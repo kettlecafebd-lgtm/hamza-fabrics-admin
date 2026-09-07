@@ -1,14 +1,12 @@
-import React, { useContext, useEffect, Suspense, lazy, useState, useCallback } from 'react';
+import { useContext, useEffect, Suspense, lazy, useState, useCallback } from 'react';
 import { BrowserRouter as Router, Routes, Route, Outlet, Navigate, useLocation } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import CommandMenu from './components/ui/CommandMenu';
 import RouteErrorBoundary from './components/ui/RouteErrorBoundary';
 
-import { CartProvider } from './context/CartContext';
 import { ThemeProvider, ThemeContext } from './context/ThemeContext';
 import { WebSocketProvider } from './context/WebSocketContext';
 import { DeviceProvider } from './context/DeviceContext';
-import { CustomerAIProfileProvider } from './context/CustomerAIProfile';
 import ErrorBoundary from './components/ErrorBoundary';
 
 // ── Layer 1: The Senses (GTM Frontend Tracking) ──
@@ -17,11 +15,8 @@ import { initGTM, pushEvent } from './lib/gtm';
 import { initFbq, fbqEvent } from './lib/fbq';
 import { appConfig } from './config/app';
 
-import PrivacyPolicy from './pages/PrivacyPolicy';
-import TermsOfService from './pages/TermsOfService';
 import Sidebar from './components/Sidebar';
 import AdminHeader from './components/AdminHeader';
-import CustomerLayout from './components/CustomerLayout';
 
 // ── V2.0: Consolidated Pages (Tab-Based SPAs) ──
 const DashboardHub = lazy(() => import('./pages/DashboardHub'));       // Overview | Live | AI | Districts
@@ -32,9 +27,6 @@ const RMACenter = lazy(() => import('./pages/RMACenter'));              // Retur
 // ── Core Pages ──
 const Products = lazy(() => import('./pages/Products'));
 const Orders = lazy(() => import('./pages/Orders'));
-const Shop = lazy(() => import('./pages/Shop'));
-const Contact = lazy(() => import('./pages/Contact'));
-const Checkout = lazy(() => import('./pages/Checkout'));
 const Login = lazy(() => import('./pages/Login'));
 const CourierManagement = lazy(() => import('./pages/CourierManagement'));
 const CategoriesBrands = lazy(() => import('./pages/CategoriesBrands'));
@@ -46,23 +38,13 @@ const EmployeeReport = lazy(() => import('./pages/EmployeeReport'));
 const MarketingSettings = lazy(() => import('./pages/admin/MarketingSettings'));
 const CRMLeads = lazy(() => import('./pages/admin/CRMLeads'));
 const FraudChecker = lazy(() => import('./pages/FraudChecker'));
-const CommandCenter = lazy(() => import('./pages/CommandCenter'));
 const CreateOrder = lazy(() => import('./pages/admin/CreateOrder'));
 const SmartRestock = lazy(() => import('./pages/SmartRestock'));
 const InventoryDashboard = lazy(() => import('./pages/InventoryDashboard'));
-const CustomerLogin = lazy(() => import('./pages/CustomerLogin'));
-const CustomerRegister = lazy(() => import('./pages/CustomerRegister'));
 const Verify2FA = lazy(() => import('./pages/Verify2FA'));
-const Profile = lazy(() => import('./pages/Profile'));
-const CustomerOrders = lazy(() => import('./pages/CustomerOrders'));
-const CustomerTrackOrder = lazy(() => import('./pages/CustomerTrackOrder'));
-const ForgotPassword = lazy(() => import('./pages/ForgotPassword'));
-const ResetPassword = lazy(() => import('./pages/ResetPassword'));
-const VerifyEmail = lazy(() => import('./pages/VerifyEmail'));
 const UnifiedInbox = lazy(() => import('./pages/UnifiedInbox'));
 const ComboBuilder = lazy(() => import('./pages/ComboBuilder'));
 const SharedPoolVisualizer = lazy(() => import('./pages/SharedPoolVisualizer'));
-const ResolutionCenter = lazy(() => import('./pages/ResolutionCenter'));
 const AnalyticsDashboard = lazy(() => import('./pages/AnalyticsDashboard'));
 
 const LoadingSpinner = () => (
@@ -77,14 +59,8 @@ const ProtectedRoute = ({ children }) => {
   return children;
 };
 
-const CustomerProtectedRoute = () => {
-  const token = localStorage.getItem('customerToken');
-  if (!token) return <Navigate to="/customer/login" replace />;
-  return <Outlet />;
-};
-
 const AdminLayout = () => {
-  const { adminTheme, isAdminDark } = useContext(ThemeContext);
+  const { adminTheme } = useContext(ThemeContext);
 
   useEffect(() => {
     document.documentElement.className = adminTheme;
@@ -167,59 +143,6 @@ function CommandMenuTrigger() {
   return <CommandMenu open={open} onClose={() => setOpen(false)} />;
 }
 
-const PORTAL_HOSTNAME = 'portal.hamzafabrics.com';
-
-function isPortalHost() {
-  const hostname = window.location.hostname.toLowerCase();
-  
-  // ১. প্রোডাকশন ডোমেইন অথবা লোকালহোস্টের পোর্টাল সাবডোমেইন চেক
-  if (hostname === PORTAL_HOSTNAME || hostname === 'portal.localhost') {
-    return true;
-  }
-  
-  // ২. লোকালহোস্টে কাজ করার সুবিধার্থে পাথ চেক 
-  // (যাতে localhost:5173/login বা /admin দিলে অ্যাডমিন প্যানেল লোড হয়)
-  const pathname = window.location.pathname.toLowerCase();
-  if (
-    hostname === 'localhost' && 
-    (pathname.startsWith('/admin') || pathname === '/login' || pathname === '/verify-2fa')
-  ) {
-    return true;
-  }
-
-  return false;
-}
-
-function CustomerRoutes() {
-  return (
-    <Routes>
-      <Route path="/" element={<Navigate to="/shop" replace />} />
-      <Route path="/customer/login" element={<CustomerLogin />} />
-      <Route path="/customer/register" element={<CustomerRegister />} />
-      <Route path="/verify-email/:token" element={<VerifyEmail />} />
-      <Route path="/forgot-password" element={<ForgotPassword />} />
-      <Route path="/reset-password" element={<ResetPassword />} />
-
-      <Route element={<CustomerLayout />}>
-        <Route path="/shop" element={<Shop />} />
-        <Route path="/contact" element={<Contact />} />
-        <Route path="/resolution-center" element={<ResolutionCenter />} />
-        <Route path="/checkout" element={<Checkout />} />
-        <Route element={<PrivacyPolicy />} path="/privacy-policy" />
-        <Route element={<TermsOfService />} path="/terms-of-service" />
-        <Route element={<CustomerProtectedRoute />}>
-          <Route path="/account/profile" element={<Profile />} />
-          <Route path="/account/orders" element={<CustomerOrders />} />
-        </Route>
-        <Route path="/account/track" element={<CustomerTrackOrder />} />
-      </Route>
-
-      {/* ── Catch-all Route: কোনো ভুল লিংকে গেলে শপ পেজে পাঠাবে ── */}
-      <Route path="*" element={<Navigate to="/shop" replace />} />
-    </Routes>
-  );
-}
-
 function AdminRoutes() {
   return (
     <Routes>
@@ -268,14 +191,9 @@ function AdminRoutes() {
         <Route path="/resolution-center" element={<Navigate to="/admin/rma" replace />} />
       </Route>
 
-      {/* ── Catch-all Route: কোনো ভুল লিংকে গেলে ড্যাশবোর্ডে পাঠাবে ── */}
       <Route path="*" element={<Navigate to="/admin/command-center" replace />} />
     </Routes>
   );
-}
-
-function DomainRoutes() {
-  return isPortalHost() ? <AdminRoutes /> : <CustomerRoutes />;
 }
 
 function App() {
@@ -302,8 +220,6 @@ function App() {
     <ErrorBoundary>
       <ThemeProvider>
         <DeviceProvider>
-          <CustomerAIProfileProvider>
-          <CartProvider>
             <WebSocketProvider>
           <Toaster 
             position="top-right" 
@@ -327,13 +243,11 @@ function App() {
             <CommandMenuTrigger />
             <RouteErrorBoundary>
             <Suspense fallback={<LoadingSpinner />}>
-              <DomainRoutes />
+              <AdminRoutes />
             </Suspense>
             </RouteErrorBoundary>
           </Router>
             </WebSocketProvider>
-          </CartProvider>
-          </CustomerAIProfileProvider>
         </DeviceProvider>
         </ThemeProvider>
     </ErrorBoundary>

@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useContext, useCallback } from 'react';
+import React, { useState, useEffect, useContext, useCallback, useRef } from 'react';
 import API_BASE_URL from '../config/api';
 import { ThemeContext } from '../context/ThemeContext';
 import VariantMatrix from '../components/ui/VariantMatrix';
 import { GlassModal } from '../components/ui/GlassCard';
 import { getToken } from '../utils/auth';
+import { compressImage, readApiResponse, isImageFile, formatBytes, MAX_UPLOAD_MB } from '../utils/imageUpload';
 
 export default function Products() {
   const { adminTheme, isAdminDark } = useContext(ThemeContext);
@@ -211,127 +212,173 @@ export default function Products() {
       return v;
   }));
 
+  const handlePickMainImage = (e) => {
+    const file = e.target.files?.[0] || null;
+    if (file && !isImageFile(file)) {
+      showToast('Please choose an image file (JPG, PNG or WEBP).', 'error');
+      e.target.value = '';
+      return;
+    }
+    if (file && file.size > MAX_UPLOAD_MB * 1024 * 1024) {
+      showToast(`Image is ${formatBytes(file.size)} — please pick one under ${MAX_UPLOAD_MB} MB.`, 'error');
+      e.target.value = '';
+      return;
+    }
+    setBaseImage(file);
+  };
+
   const addReview = () => setReviews([...reviews, { id: Date.now(), name: '', comment: '', imageFile: null, existing_image: null }]);
   const updateReview = (id, field, value) => setReviews(reviews.map(r => r.id === id ? { ...r, [field]: value } : r));
   const removeReview = (id) => setReviews(reviews.filter(r => r.id !== id));
 
-  // 🟢 [FIXED]: FormData Submit Logic
+  // 🟢 FormData submit logic (create + update)
+  //
+  // Two bugs used to make image uploads fail with a generic
+  // "Failed to update product." toast:
+  //   1. The submit button called this handler AND the <form> onSubmit did too,
+  //      so two PUT/POST requests raced each other.
+  //   2. Phone photos (3-8 MB) were uploaded untouched. nginx rejects bodies
+  //      over 1 MB by default (Vercel: 4.5 MB) and answers with an HTML 413 page,
+  //      so `response.json()` blew up and every failure looked identical.
+  // Now: single guarded submit, browser-side compression, and the real
+  // HTTP status / server message is shown to the admin.
+  const submittingRef = useRef(false);
+
   const handleAddProduct = async (e) => {
-    e.preventDefault();
+    e?.preventDefault();
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     setIsSubmitting(true);
-    const submissionData = new FormData();
 
-    // 1. Append Text Data
-    submissionData.append('name', baseProd.name);
-    submissionData.append('sku', baseProd.sku);
-    submissionData.append('category', baseProd.category);
-    submissionData.append('brand', baseProd.brand);
-    submissionData.append('color', baseProd.color);
-    submissionData.append('details', baseProd.details);
-    submissionData.append('cost_price', baseProd.cost_price || 0);
-    submissionData.append('price', baseProd.price || 0);
-    submissionData.append('discount', baseProd.discount || 0);
-    submissionData.append('stock_quantity', baseProd.stock || 0);
-
-    // 2. Main Image
-    if (baseImage) {
-        submissionData.append('image', baseImage);
-    } else if (editingId) {
-        submissionData.append('image_url', products.find(p=>p.id===editingId)?.image_url || '');
-    }
-
-    // 3. Variant JSON Array Processing
-    let allVariantsToSubmit = [];
-
-    // Base Sizes
-    if (baseProd.hasSizes && baseProd.sizes.length > 0) {
-        allVariantsToSubmit.push({
-            color: baseProd.color || 'Base',
-            sku: baseProd.sku,
-            sizes: baseProd.sizes.map(s => ({
-                size: s.size,
-                stock: s.stock,
-                price: s.price || baseProd.price,
-                cost_price: s.cost_price || 0,
-                child_sku: `${baseProd.sku}_${s.size}`
-            }))
-        });
-    }
-
-    // Extra Variants
-    extraVariants.forEach((v) => {
-        let variantSizes = v.hasSizes && v.sizes.length > 0
-            ? v.sizes.map(s => ({
-                size: s.size,
-                stock: s.stock,
-                price: s.price || v.price,
-                cost_price: s.cost_price || 0,
-                child_sku: `${v.sku}_${s.size}`
-            }))
-            : [{
-                size: 'Free Size',
-                stock: v.stock,
-                price: v.price,
-                cost_price: v.cost_price || 0,
-                child_sku: `${v.sku}_FS`
-            }];
-
-        allVariantsToSubmit.push({
-            color: v.color || '',
-            sku: v.sku,
-            sizes: variantSizes,
-            image_url: v.existing_image_url || ''
-        });
-    });
-
-    // 4. Submit Variants JSON & Match Image Indexes Properly
-    if (allVariantsToSubmit.length > 0) {
-        submissionData.append('hasVariants', 'true');
-        submissionData.append('variantsData', JSON.stringify(allVariantsToSubmit));
-
-        // 🟢 FIX: Calculate exactly where extra variants start in the JSON array
-        const extraVariantOffset = (baseProd.hasSizes && baseProd.sizes.length > 0) ? 1 : 0;
-
-        extraVariants.forEach((v, index) => {
-            if (v.imageFile) {
-                const correctIndex = extraVariantOffset + index;
-                // এখন variantImage_1, variantImage_2 ব্যাকএন্ডের লুপের সাথে ঠিক মিলবে
-                submissionData.append(`variantImage_${correctIndex}`, v.imageFile);
-            }
-        });
-    } else {
-        submissionData.append('hasVariants', 'false');
-    }
-
-    // 5. Reviews Array & Images
-    const reviewsToSubmit = reviews.map(r => ({ name: r.name, comment: r.comment, existing_image: r.existing_image || null }));
-    if(reviewsToSubmit.length > 0) {
-        submissionData.append('reviewsData', JSON.stringify(reviewsToSubmit));
-        reviews.forEach((r, index) => {
-            if (r.imageFile) submissionData.append(`reviewImage_${index}`, r.imageFile);
-        });
-    }
-
-    const url = editingId ? `${API_BASE_URL}/api/products/${editingId}` : `${API_BASE_URL}/api/products`;
     try {
-      // 🟢 Note: Do NOT manually set 'Content-Type': 'multipart/form-data'. Fetch handles boundaries automatically when passing FormData object.
+      const submissionData = new FormData();
+
+      // 0. Shrink images in the browser before they hit the wire.
+      const [mainImageToSend, variantImagesToSend, reviewImagesToSend] = await Promise.all([
+        baseImage ? compressImage(baseImage) : Promise.resolve(null),
+        Promise.all(extraVariants.map(v => (v.imageFile ? compressImage(v.imageFile) : Promise.resolve(null)))),
+        Promise.all(reviews.map(r => (r.imageFile ? compressImage(r.imageFile) : Promise.resolve(null)))),
+      ]);
+
+      // 1. Text fields
+      submissionData.append('name', baseProd.name);
+      submissionData.append('sku', baseProd.sku);
+      submissionData.append('category', baseProd.category);
+      submissionData.append('brand', baseProd.brand);
+      submissionData.append('color', baseProd.color);
+      submissionData.append('details', baseProd.details);
+      submissionData.append('cost_price', baseProd.cost_price || 0);
+      submissionData.append('price', baseProd.price || 0);
+      submissionData.append('discount', baseProd.discount || 0);
+      submissionData.append('stock_quantity', baseProd.stock || 0);
+
+      // 2. Main image — send the (compressed) file; otherwise keep the existing URL
+      if (mainImageToSend) {
+          submissionData.append('image', mainImageToSend);
+      } else if (editingId) {
+          submissionData.append('image_url', products.find(p => p.id === editingId)?.image_url || '');
+      }
+
+      // 3. Variant JSON
+      const allVariantsToSubmit = [];
+
+      if (baseProd.hasSizes && baseProd.sizes.length > 0) {
+          allVariantsToSubmit.push({
+              color: baseProd.color || 'Base',
+              sku: baseProd.sku,
+              sizes: baseProd.sizes.map(s => ({
+                  size: s.size,
+                  stock: s.stock,
+                  price: s.price || baseProd.price,
+                  cost_price: s.cost_price || 0,
+                  child_sku: `${baseProd.sku}_${s.size}`
+              }))
+          });
+      }
+
+      extraVariants.forEach((v) => {
+          const variantSizes = v.hasSizes && v.sizes.length > 0
+              ? v.sizes.map(s => ({
+                  size: s.size,
+                  stock: s.stock,
+                  price: s.price || v.price,
+                  cost_price: s.cost_price || 0,
+                  child_sku: `${v.sku}_${s.size}`
+              }))
+              : [{
+                  size: 'Free Size',
+                  stock: v.stock,
+                  price: v.price,
+                  cost_price: v.cost_price || 0,
+                  child_sku: `${v.sku}_FS`
+              }];
+
+          allVariantsToSubmit.push({
+              color: v.color || '',
+              sku: v.sku,
+              sizes: variantSizes,
+              image_url: v.existing_image_url || ''
+          });
+      });
+
+      // 4. Variant images: field indexes must line up with the JSON array above
+      if (allVariantsToSubmit.length > 0) {
+          submissionData.append('hasVariants', 'true');
+          submissionData.append('variantsData', JSON.stringify(allVariantsToSubmit));
+
+          const extraVariantOffset = (baseProd.hasSizes && baseProd.sizes.length > 0) ? 1 : 0;
+
+          variantImagesToSend.forEach((file, index) => {
+              if (file) submissionData.append(`variantImage_${extraVariantOffset + index}`, file);
+          });
+      } else {
+          submissionData.append('hasVariants', 'false');
+      }
+
+      // 5. Reviews
+      const reviewsToSubmit = reviews.map(r => ({ name: r.name, comment: r.comment, existing_image: r.existing_image || null }));
+      if (reviewsToSubmit.length > 0) {
+          submissionData.append('reviewsData', JSON.stringify(reviewsToSubmit));
+          reviewImagesToSend.forEach((file, index) => {
+              if (file) submissionData.append(`reviewImage_${index}`, file);
+          });
+      }
+
+      const url = editingId ? `${API_BASE_URL}/api/products/${editingId}` : `${API_BASE_URL}/api/products`;
+      // 🟢 Do NOT set 'Content-Type': 'multipart/form-data' manually — the browser
+      // must add the multipart boundary itself.
       const response = await fetch(url, {
           method: editingId ? 'PUT' : 'POST',
           headers: { 'Authorization': `Bearer ${getToken()}` },
           body: submissionData
       });
-      const result = await response.json();
-      if (result.success) {
-          closeAndResetModal();
-          fetchData();
-          showToast(editingId ? 'Product Updated!' : 'Product Saved!', 'success');
-      } else {
-          showToast(result.message || 'Action failed!', 'error');
-      }
+
+      const result = await readApiResponse(response); // throws with the real reason
+
+      closeAndResetModal();
+      fetchData();
+      showToast(editingId ? 'Product Updated!' : 'Product Saved!', 'success');
+      return result;
     } catch (error) {
-        showToast('Server connection failed.', 'error');
+      console.error('[products] save failed:', {
+        status: error?.status,
+        message: error?.message,
+        data: error?.data,
+        editingId,
+        imageName: baseImage?.name,
+        imageSize: baseImage ? formatBytes(baseImage.size) : null,
+      });
+
+      if (error?.status) {
+        showToast(`Save failed (HTTP ${error.status}): ${error.message}`, 'error');
+      } else if (error?.message && /fetch|network|load failed/i.test(error.message)) {
+        showToast('Cannot reach the server. Check your connection and try again.', 'error');
+      } else {
+        showToast(error?.message || 'Failed to update product.', 'error');
+      }
     } finally {
-        setIsSubmitting(false);
+      submittingRef.current = false;
+      setIsSubmitting(false);
     }
   };
 
@@ -580,8 +627,22 @@ export default function Products() {
                 <div className="space-y-4 flex flex-col">
                   <div>
                       <label className="block text-xs font-bold text-t-muted mb-1 uppercase">Main Image Upload</label>
-                      <input type="file" onChange={e => setBaseImage(e.target.files[0])} className="w-full border border-dashed border-t-border bg-t-base rounded-lg p-2 text-sm" />
-                      {editingId && !baseImage && <span className="text-[10px] text-green-600 font-bold mt-1 block">System maintaining previous image.</span>}
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={handlePickMainImage}
+                        className="w-full border border-dashed border-t-border bg-t-base rounded-lg p-2 text-sm"
+                      />
+                      {baseImage ? (
+                        <span className="text-[10px] font-bold mt-1 block text-t-muted">
+                          {baseImage.name} · {formatBytes(baseImage.size)}
+                          {baseImage.size > 1024 * 1024 && <span className="text-emerald-600"> → auto-compressed before upload</span>}
+                        </span>
+                      ) : editingId ? (
+                        <span className="text-[10px] text-green-600 font-bold mt-1 block">System maintaining previous image.</span>
+                      ) : (
+                        <span className="text-[10px] text-t-muted mt-1 block">JPG / PNG / WEBP · large photos are resized automatically.</span>
+                      )}
                   </div>
                   <div className="flex-1">
                       <label className="block text-xs font-bold text-t-muted mb-1 uppercase">Detailed Description</label>
@@ -679,7 +740,7 @@ export default function Products() {
                             </div>
                             <div className="col-span-2 md:col-span-5">
                                 <label className="block text-[10px] font-bold text-t-muted mb-1 uppercase">Color Image</label>
-                                <input type="file" onChange={(e) => updateExtraVariant(variant.id, 'imageFile', e.target.files[0])} className="w-full border border-dashed border-t-border bg-t-surface rounded-lg p-1.5 text-xs" />
+                                <input type="file" accept="image/*" onChange={(e) => updateExtraVariant(variant.id, 'imageFile', e.target.files[0])} className="w-full border border-dashed border-t-border bg-t-surface rounded-lg p-1.5 text-xs" />
                                 {variant.existing_image_url && !variant.imageFile && <span className="text-[10px] text-green-600 font-bold mt-1 block">Image saved — replace above to change</span>}
                             </div>
                             </div>
@@ -737,7 +798,7 @@ export default function Products() {
                                 </div>
                                 <div>
                                     <label className="block text-[10px] font-bold text-t-muted mb-1 uppercase">Asset (Image)</label>
-                                    <input type="file" onChange={(e) => updateReview(review.id, 'imageFile', e.target.files[0])} className="w-full border border-dashed border-t-border bg-t-surface rounded-lg p-1.5 text-xs" />
+                                    <input type="file" accept="image/*" onChange={(e) => updateReview(review.id, 'imageFile', e.target.files[0])} className="w-full border border-dashed border-t-border bg-t-surface rounded-lg p-1.5 text-xs" />
                                     {review.existing_image && !review.imageFile && <a href={review.existing_image} target="_blank" rel="noreferrer" className="text-[10px] text-pink-600 mt-1 font-bold block underline">Inspect Current Image</a>}
                                 </div>
                             </div>
@@ -755,7 +816,7 @@ export default function Products() {
 
             <div className="px-8 py-4 border-t border-gray-200/50 dark:border-white/10 flex justify-end gap-4 shrink-0">
                 <button type="button" onClick={closeAndResetModal} className="px-6 py-2.5 rounded-xl font-bold text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-white/10 transition border border-gray-200 dark:border-white/10">Halt Process</button>
-                <button type="submit" onClick={handleAddProduct} disabled={isSubmitting} className="px-8 py-2.5 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-xl font-extrabold text-sm hover:from-indigo-700 hover:to-purple-700 shadow-lg shadow-indigo-500/25 hover:shadow-xl transition-all duration-300 active:scale-95 flex items-center gap-2">
+                <button type="submit" disabled={isSubmitting} className="px-8 py-2.5 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-xl font-extrabold text-sm hover:from-indigo-700 hover:to-purple-700 shadow-lg shadow-indigo-500/25 hover:shadow-xl transition-all duration-300 active:scale-95 flex items-center gap-2">
                     {isSubmitting ? 'Transmitting Data...' : 'Execute Data Commit'}
                 </button>
             </div>

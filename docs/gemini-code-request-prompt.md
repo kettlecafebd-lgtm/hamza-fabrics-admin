@@ -112,3 +112,86 @@ Walk me through, step by step, how to:
 Give the snippet ready to paste, with a placeholder for the product ID and the token,
 and make sure it does NOT permanently modify any product data.
 ```
+
+---
+
+# ধাপ ২: কোডটা খুঁজে বের করা (জেমিনি "NOT FOUND" বলার পর)
+
+জেমিনির আউটপুটে দেখা গেল: `AI FOCAL POINT`, `AUTO-FILL WITH AI BRAIN`, `Save Product` —
+এই স্ট্রিংগুলো **কোনো ফাইলেই নেই**, শুধু `src/config`, `src/utils`, `nginx.conf`, `Dockerfile`,
+`vercel.json`, `package.json` পাওয়া গেছে। অর্থাৎ যে প্রজেক্ট জেমিনি স্ক্যান করেছে, সেটা
+**পুরোনো** (এই রিপোর মতোই)। লাইভ অ্যাডমিন (`hamzafabrics.com/admin`) নতুন কোড থেকে বিল্ড হয়েছে,
+যেটা এখনো কোথাও কমিট হয়নি।
+
+## উপায় A — আসল ফোল্ডার খুঁজুন (সবচেয়ে ভালো)
+
+Windows PowerShell (যেখানে কোড আছে):
+
+```powershell
+Get-ChildItem -Path C:\ -Recurse -Include *.jsx,*.js,*.tsx -ErrorAction SilentlyContinue |
+  Select-String -Pattern "AI FOCAL POINT|AUTO-FILL WITH AI BRAIN" -List |
+  Select-Object Path, Line
+```
+
+macOS / Linux / Git Bash:
+
+```bash
+grep -rl --exclude-dir={node_modules,.git,dist,build} -E "AI FOCAL POINT|AUTO-FILL WITH AI BRAIN" ~ 2>/dev/null
+```
+
+যে ফাইল আসবে → ওটাই আসল মডাল কম্পোনেন্ট। সেই ফোল্ডারটা জেমিনিকে দিন (পুরো প্রজেক্টের রুট),
+তারপর উপরের প্রম্পট ১ আবার চালান। ফোল্ডারের নাম যা-ই হোক (`hamza-admin-v2`, `admin-new`,
+`Downloads/admin-latest` …), **`npm run build` যে ফোল্ডার থেকে চলে সেটাই** আসল।
+
+## উপায় B — সোর্স না থাকলেও লাইভ বান্ডল থেকে কোড বের করা
+
+১. কম্পিউটারে ব্রাউজারে লাইভ অ্যাডমিন খুলুন → Products পেজে যান → একটা প্রোডাক্টের **Edit** খুলুন
+   (এতে Products-এর JS chunk লোড হবে)।
+২. F12 → Console → নিচেরটা পেস্ট করে Enter:
+
+```js
+(async () => {
+  const srcs = [...document.querySelectorAll('script[src]')].map(s => s.src);
+  let out = '';
+  for (const src of srcs) {
+    let t;
+    try { t = await (await fetch(src)).text(); } catch { continue; }
+    if (/Failed to update product|AI FOCAL POINT|AUTO-FILL WITH AI BRAIN|variantImage_/.test(t)) {
+      out += `\n\n/* ==== ${src} ==== */\n` + t;
+    }
+  }
+  if (!out) { console.warn('কিছু পাওয়া যায়নি — আগে Products পেজ + Edit মডাল খুলুন'); return; }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([out], { type: 'text/plain' }));
+  a.download = 'live-admin-bundle.js';
+  a.click();
+  console.log('ডাউনলোড হয়েছে:', (out.length / 1024).toFixed(0), 'KB');
+})();
+```
+
+৩. `live-admin-bundle.js` ফাইলটা এখানে আপলোড করুন। (এটা ব্রাউজারে পাবলিকলি ডাউনলোড হওয়া
+   কোড — কোনো টোকেন/পাসওয়ার্ড এতে থাকে না; মিনিফাইড হলেও আপলোড/সেভের লজিক পরিষ্কার পড়া যায়।)
+
+শুধু চোখে দেখতে চাইলে (ডাউনলোড ছাড়া):
+
+```js
+(async () => {
+  for (const src of [...document.querySelectorAll('script[src]')].map(s => s.src)) {
+    const t = await (await fetch(src)).text();
+    const i = t.indexOf('Failed to update product');
+    if (i > -1) { console.log(src); console.log(t.slice(i - 2000, i + 2000)); }
+  }
+})();
+```
+
+## উপায় C — কিছুই পাওয়া না গেলে, সার্ভার সাইড থেকে ধরুন
+
+লাইভ অ্যাডমিন কোথায় হোস্টেড সেটা জানালেই আমি নির্দিষ্ট কনফিগ দিতে পারব:
+
+| হোস্টিং | যা বদলাতে হবে |
+|---|---|
+| cPanel / Apache | `.htaccess`: `php_value post_max_size 32M`, `upload_max_filesize 32M`, `LimitRequestBody 33554432`, `php_value max_execution_time 120` |
+| nginx + Node | `client_max_body_size 25m;` (এই রিপোতে ফিক্স করা আছে) |
+| Vercel / Netlify Functions | ৪.৫ MB হার্ড লিমিট — কমপ্রেশন ছাড়া উপায় নেই |
+| Node/Express backend | `express.json({ limit: '25mb' })` (multipart-এ লাগে না) + `multer({ limits: { fileSize: 25 * 1024 * 1024 } })` |
+| PHP backend | `upload_max_filesize`, `post_max_size`, `max_execution_time`, `upload_tmp_dir` পারমিশন |

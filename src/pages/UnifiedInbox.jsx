@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useContext } from 'react';
+import { useCallback, useState, useEffect, useContext } from 'react';
 import { ThemeContext } from '../context/ThemeContext';
 import { useWebSocket } from '../context/WebSocketContext';
 import API_BASE_URL from '../config/api';
@@ -20,20 +20,44 @@ export default function UnifiedInbox() {
   const [showMobileChat, setShowMobileChat] = useState(false);
   const [showContextPanel, setShowContextPanel] = useState(true);
 
-  const fetchConversations = async () => {
+  const requestConversations = useCallback(async () => {
+    const token = localStorage.getItem('adminToken');
+    const res = await fetch(`${API_BASE_URL}/api/chat/conversations?limit=100`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const data = await res.json();
+    if (!res.ok || !data?.success || !Array.isArray(data.conversations)) {
+      throw new Error(data?.message || `Failed to load conversations (${res.status}).`);
+    }
+    return data.conversations;
+  }, []);
+
+  const fetchConversations = useCallback(async () => {
     setLoading(true);
     try {
-      const token = localStorage.getItem('adminToken');
-      const res = await fetch(`${API_BASE_URL}/api/chat/conversations?limit=100`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const data = await res.json();
-      if (data.success) setConversations(data.conversations);
-    } catch (e) { console.error(e); }
-    setLoading(false);
-  };
+      setConversations(await requestConversations());
+    } catch (error) {
+      console.error('Failed to fetch conversations:', error);
+    } finally {
+      setLoading(false);
+    }
+  }, [requestConversations]);
 
-  useEffect(() => { fetchConversations(); }, []);
+  useEffect(() => {
+    let cancelled = false;
+    requestConversations()
+      .then(items => {
+        if (!cancelled) setConversations(items);
+      })
+      .catch(error => {
+        if (!cancelled) console.error('Failed to fetch conversations:', error);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => { cancelled = true; };
+  }, [requestConversations]);
 
   // WebSocket: listen for new messages
   useEffect(() => {
@@ -61,7 +85,7 @@ export default function UnifiedInbox() {
     });
 
     return () => { unsub1(); unsub2(); };
-  }, [subscribe, selectedId]);
+  }, [subscribe, selectedId, fetchConversations]);
 
   const handleSelect = (id) => {
     setSelectedId(id);
@@ -123,6 +147,7 @@ export default function UnifiedInbox() {
           showMobileChat ? 'flex' : 'hidden md:flex'
         }`}>
           <ChatThread
+            key={selectedId ?? 'no-conversation'}
             conversationId={selectedId}
             conversation={selectedConv}
             isDark={isDark}

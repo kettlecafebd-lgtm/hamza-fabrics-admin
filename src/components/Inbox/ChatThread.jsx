@@ -1,53 +1,143 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Send, ArrowLeft } from 'lucide-react';
 import API_BASE_URL from '../../config/api';
+import { useWebSocket } from '../../context/WebSocketContext';
+
+function mergeMessages(...messageLists) {
+  const messages = [];
+  const seen = new Set();
+
+  for (const list of messageLists) {
+    if (!Array.isArray(list)) continue;
+
+    for (const message of list) {
+      if (!message || typeof message !== 'object') continue;
+      const key = message.id != null
+        ? `id:${message.id}`
+        : `fallback:${message.direction || ''}:${message.created_at || ''}:${message.content || ''}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      messages.push(message);
+    }
+  }
+
+  return messages;
+}
 
 export default function ChatThread({ conversationId, conversation, isDark, onBack }) {
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const [sendError, setSendError] = useState('');
   const messagesEndRef = useRef(null);
+  const { subscribe } = useWebSocket();
 
-  const fetchMessages = async () => {
+  const requestMessages = useCallback(async (signal) => {
+    if (!conversationId) return [];
+
+    const token = localStorage.getItem('adminToken');
+    const res = await fetch(`${API_BASE_URL}/api/chat/conversations/${conversationId}/messages?limit=100`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal,
+    });
+    const data = await res.json();
+    if (!res.ok || !data?.success || !Array.isArray(data.messages)) {
+      throw new Error(data?.message || `Failed to load messages (${res.status}).`);
+    }
+    return data.messages;
+  }, [conversationId]);
+
+  const fetchMessages = useCallback(async (signal) => {
     if (!conversationId) return;
     setLoading(true);
+    setLoadError('');
+
     try {
-      const token = localStorage.getItem('adminToken');
-      const res = await fetch(`${API_BASE_URL}/api/chat/conversations/${conversationId}/messages?limit=100`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const data = await res.json();
-      if (data.success) setMessages(data.messages);
-    } catch (e) { console.error(e); }
-    setLoading(false);
-  };
+      const history = await requestMessages(signal);
+      if (!signal?.aborted) {
+        // Preserve messages that arrived over the socket while history was loading.
+        setMessages(current => mergeMessages(history, current));
+      }
+    } catch (error) {
+      if (!signal?.aborted) {
+        console.error('Failed to fetch chat messages:', error);
+        setLoadError(error.message || 'Could not load messages.');
+      }
+    } finally {
+      if (!signal?.aborted) setLoading(false);
+    }
+  }, [conversationId, requestMessages]);
 
   useEffect(() => {
-    fetchMessages();
-  }, [conversationId]);
+    if (!conversationId) return undefined;
+
+    const controller = new AbortController();
+    requestMessages(controller.signal)
+      .then(history => {
+        if (controller.signal.aborted) return;
+        setLoadError('');
+        // Preserve messages that arrived over the socket while history was loading.
+        setMessages(current => mergeMessages(history, current));
+      })
+      .catch(error => {
+        if (controller.signal.aborted) return;
+        console.error('Failed to fetch chat messages:', error);
+        setLoadError(error.message || 'Could not load messages.');
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [conversationId, requestMessages]);
+
+  useEffect(() => {
+    if (!conversationId) return undefined;
+
+    return subscribe('chat:new_message', (event) => {
+      if (String(event?.conversationId) !== String(conversationId) || !event.message) return;
+      setMessages(current => mergeMessages(current, [event.message]));
+    });
+  }, [conversationId, subscribe]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
   const handleSend = async () => {
-    if (!newMessage.trim() || sending) return;
+    const content = newMessage.trim();
+    if (!content || !conversationId || sending) return;
+
     setSending(true);
+    setSendError('');
     try {
       const token = localStorage.getItem('adminToken');
       const res = await fetch(`${API_BASE_URL}/api/chat/conversations/${conversationId}/messages`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ content: newMessage }),
+        body: JSON.stringify({ content }),
       });
       const data = await res.json();
-      if (data.success) {
-        setMessages(prev => [...prev, data.message]);
-        setNewMessage('');
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.message || `Failed to send message (${res.status}).`);
       }
-    } catch (e) { console.error(e); }
-    setSending(false);
+
+      if (data.message) {
+        setMessages(current => mergeMessages(current, [data.message]));
+      } else {
+        // Some APIs acknowledge a send without returning the saved message.
+        setLoadError('');
+        setLoading(true);
+        await fetchMessages();
+      }
+      setNewMessage('');
+    } catch (error) {
+      console.error('Failed to send chat message:', error);
+      setSendError(error.message || 'Could not send message.');
+    } finally {
+      setSending(false);
+    }
   };
 
   if (!conversationId) {
@@ -88,16 +178,27 @@ export default function ChatThread({ conversationId, conversation, isDark, onBac
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-4 space-y-3">
+        {loadError && (
+          <div role="alert" className="flex items-center justify-between gap-3 rounded-xl border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-500">
+            <span>{loadError}</span>
+            <button
+              onClick={() => { setLoadError(''); setLoading(true); fetchMessages(); }}
+              className="shrink-0 font-bold underline"
+            >
+              Retry
+            </button>
+          </div>
+        )}
         {loading ? (
           <div className="flex justify-center py-8">
             <div className="w-6 h-6 border-2 border-t-primary border-t-transparent rounded-full animate-spin"></div>
           </div>
         ) : messages.length === 0 ? (
-          <div className="text-center py-8 text-t-muted text-sm">No messages yet</div>
+          loadError ? null : <div className="text-center py-8 text-t-muted text-sm">No messages yet</div>
         ) : messages.map(msg => {
           const isOutbound = msg.direction === 'outbound';
           return (
-            <div key={msg.id} className={`flex ${isOutbound ? 'justify-end' : 'justify-start'}`}>
+            <div key={msg.id ?? `${msg.created_at}-${msg.content}`} className={`flex ${isOutbound ? 'justify-end' : 'justify-start'}`}>
               <div className={`max-w-[75%] rounded-2xl px-4 py-2.5 ${
                 isOutbound
                   ? 'bg-t-primary text-white rounded-br-md'
@@ -119,11 +220,12 @@ export default function ChatThread({ conversationId, conversation, isDark, onBac
 
       {/* Input */}
       <div className="p-3 border-t border-t-border">
+        {sendError && <p role="alert" className="mb-2 text-xs font-medium text-red-500">{sendError}</p>}
         <div className="flex gap-2">
           <input
             type="text"
             value={newMessage}
-            onChange={e => setNewMessage(e.target.value)}
+            onChange={e => { setNewMessage(e.target.value); setSendError(''); }}
             onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleSend()}
             placeholder="Type a message..."
             className="flex-1 px-4 py-2.5 rounded-xl text-sm border border-t-border bg-t-base focus:outline-none focus:ring-2 focus:ring-t-primary/40"

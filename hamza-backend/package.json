@@ -1,0 +1,20 @@
+{
+  "name": "hamza-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Hamza Fabrics backend — chat media stored as CDN URLs, never as blobs",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4",
+    "express": "^4.21.2"
+  }
+}

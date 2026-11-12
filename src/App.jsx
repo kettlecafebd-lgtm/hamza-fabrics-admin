@@ -68,19 +68,21 @@ const AdminLayout = () => {
 
   return (
     <ProtectedRoute>
-      <div className="flex min-h-screen font-sans bg-t-base text-t-main transition-colors duration-300">
-        <Sidebar />
-        <div className="flex-1 flex flex-col h-screen overflow-hidden">
-          <AdminHeader />
-          <div className="flex-1 overflow-y-auto">
-            <RouteErrorBoundary>
-              <Suspense fallback={<LoadingSpinner />}>
-                <Outlet />
-              </Suspense>
-            </RouteErrorBoundary>
+      <WebSocketProvider>
+        <div className="flex min-h-screen font-sans bg-t-base text-t-main transition-colors duration-300">
+          <Sidebar />
+          <div className="flex-1 flex flex-col h-screen overflow-hidden">
+            <AdminHeader />
+            <div className="flex-1 overflow-y-auto">
+              <RouteErrorBoundary>
+                <Suspense fallback={<LoadingSpinner />}>
+                  <Outlet />
+                </Suspense>
+              </RouteErrorBoundary>
+            </div>
           </div>
         </div>
-      </div>
+      </WebSocketProvider>
     </ProtectedRoute>
   );
 };
@@ -220,9 +222,8 @@ function App() {
     <ErrorBoundary>
       <ThemeProvider>
         <DeviceProvider>
-            <WebSocketProvider>
-          <Toaster 
-            position="top-right" 
+          <Toaster
+            position="top-right"
             reverseOrder={false}
             toastOptions={{
               duration: 3000,
@@ -237,19 +238,18 @@ function App() {
               },
             }}
           />
-          
+
           <Router>
             <PageViewTracker />
             <CommandMenuTrigger />
             <RouteErrorBoundary>
-            <Suspense fallback={<LoadingSpinner />}>
-              <AdminRoutes />
-            </Suspense>
+              <Suspense fallback={<LoadingSpinner />}>
+                <AdminRoutes />
+              </Suspense>
             </RouteErrorBoundary>
           </Router>
-            </WebSocketProvider>
         </DeviceProvider>
-        </ThemeProvider>
+      </ThemeProvider>
     </ErrorBoundary>
   );
 }

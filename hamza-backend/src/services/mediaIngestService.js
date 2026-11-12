@@ -1,7 +1,6 @@
 import {
   extractAttachmentFromMessengerMessage,
   extractAttachmentFromWhatsAppMessage,
-  normalizePlatform,
   toMessageColumns,
 } from './attachmentResolver.js';
 

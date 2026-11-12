@@ -1,5 +1,5 @@
 import { HttpError } from '../lib/httpError.js';
-import { normalizeAttachments, pickAttachmentUrl } from './graphClient.js';
+import { pickAttachmentUrl } from './graphClient.js';
 
 /**
  * THE REFACTOR, IN ONE PLACE.

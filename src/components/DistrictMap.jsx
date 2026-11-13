@@ -23,11 +23,7 @@ const DistrictGeography = React.memo(({ geo, fillColor, strokeColor, strokeWidth
       fill={fillColor}
       stroke={strokeColor}
       strokeWidth={strokeWidth}
-      style={{
-        default: { outline: "none", transition: "all 0.2s ease" },
-        hover: { fill: '#38bdf8', outline: "none", cursor: "pointer", transition: "all 0.15s ease" },
-        pressed: { outline: "none" }
-      }}
+      className="outline-none cursor-pointer transition-all duration-200 hover:fill-[#38bdf8]"
       onClick={onClick}
     >
       <title>{tooltip}</title>

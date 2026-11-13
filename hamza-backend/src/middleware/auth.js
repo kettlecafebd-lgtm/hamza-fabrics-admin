@@ -4,7 +4,7 @@ import { unauthorized } from '../lib/httpError.js';
  * Admin authentication for inbox endpoints.
  *
  * The frontend sends `Authorization: Bearer <adminToken>` where adminToken is
- * issued by /api/auth/login (see src/lib/authFetch.js). This module verifies
+ * issued by /api/auth/login (see the frontend's src/utils/auth.js). This module verifies
  * it as a Supabase-issued JWT and requires an admin-ish role claim.
  *
  * Media proxying is deliberately NOT behind this middleware: <img> tags cannot

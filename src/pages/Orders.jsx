@@ -6,6 +6,7 @@ import React, { useState, useEffect } from 'react';
 import { ChevronLeft, ChevronRight as ChevronRightIcon, X, ShoppingBag } from 'lucide-react';
 import { useReactToPrint } from 'react-to-print';
 import API_BASE_URL from '../config/api';
+import { checkCheckout } from '../utils/brain';
 import toast from 'react-hot-toast';
 
 import OrderTabs from "../components/Orders/OrderTabs";
@@ -77,6 +78,7 @@ export default function Orders() {
   
   const [fraudData, setFraudData] = useState(null);
   const [checkingPhone, setCheckingPhone] = useState(null);
+  const [brainFlags, setBrainFlags] = useState({}); // order id -> the Brain's answer, see utils/brain.js
 
   // Module Z: Thermal Sticker Printing
   const stickerRef = useRef(null);
@@ -254,7 +256,8 @@ export default function Orders() {
     
     setIsSyncing(true);
     let updatedCount = 0;
-    let brainFlags = 0;
+    let brainBlocked = 0;
+    let brainFailed = 0;
 
     for (const order of ordersToCheck) {
       if (!order.customer?.phone) continue;
@@ -272,16 +275,18 @@ export default function Orders() {
            });
            updatedCount++;
         }
-        const brainRes = await fetch(`${API_BASE_URL}/api/brain/check-checkout`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ phone: order.customer.phone, delivery_area: order.customer?.area || '' })
-        });
-        const brainData = await brainRes.json();
-        if (brainData.success && !brainData.cod_allowed) brainFlags++;
       } catch(err) { console.error(`Failed for ${order.customer.phone}`, err); }
+
+      // The Brain is asked after the courier try/catch, so a courier problem cannot skip it.
+      // Each answer is kept, so the table shows a badge on the order (not only a number in the message).
+      const flag = await checkCheckout(order);
+      setBrainFlags(prev => ({ ...prev, [order.id]: flag }));
+      if (flag?.failed) brainFailed++; else if (flag) brainBlocked++;
     }
     setIsSyncing(false);
-    toast.success(`Bulk check complete. Updated ${updatedCount} customers. ${brainFlags} flagged by Brain.`);
+    const message = `Bulk check complete. Updated ${updatedCount} customers. ${brainBlocked} flagged by Brain.`;
+    if (brainFailed > 0) toast.error(`${message} The Brain could not check ${brainFailed} order(s): they show a grey "BRAIN ?" badge, click it to ask again.`, { duration: 8000 });
+    else toast.success(message);
     fetchData();
   };
 
@@ -404,7 +409,7 @@ export default function Orders() {
     try {
       const response = await fetch(url, { method, headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${getToken()}` }, body: JSON.stringify(payload) });
       const result = await response.json();
-      if(result.success) { toast.success('Order Updated Successfully!'); setShowOrderModal(false); fetchData(); } 
+      if(result.success) { toast.success('Order Updated Successfully!'); setShowOrderModal(false); setBrainFlags(prev => ({ ...prev, [orderFormData.id]: undefined })); fetchData(); } 
       else toast.error(result.message);
     } catch (err) { toast.error('Failed to save order'); } finally { setIsSaving(false); }
   };
@@ -587,7 +592,7 @@ export default function Orders() {
           handleSendToCourier={handleSendToCourier} selectedCouriers={selectedCouriers} setSelectedCouriers={setSelectedCouriers} couriers={couriers}
           openActionId={openActionId} setOpenActionId={setOpenActionId} handlePrintSingle={handlePrintSingle} handlePrintSingleSticker={handlePrintSingleSticker} handleStatusChange={handleStatusChange}
           setEnlargedImage={setEnlargedImage} openEditModal={openEditModal} handleAddNote={handleAddNote} handleCreateTask={handleCreateTask} handleJpgExport={handleJpgExport}
-          visibleColumns={visibleColumns} 
+          visibleColumns={visibleColumns} brainFlags={brainFlags} setBrainFlags={setBrainFlags}
         />
 
         <div className="bg-t-surface border-t border-t-border p-4 flex flex-col sm:flex-row justify-between items-center text-[12px] text-t-muted shrink-0">

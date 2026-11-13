@@ -1,7 +1,12 @@
-import React, { useState, Suspense } from 'react';
+import React, { Suspense } from 'react';
+import { useSearchParams } from 'react-router-dom';
 
 /**
  * TabShell — Reusable lazy-loaded tab container
+ *
+ * The open tab lives in the address (?tab=ai), so a link, a reload and the
+ * command menu can open a page on the right tab. An unknown or missing ?tab
+ * opens the first tab.
  *
  * Props:
  *   tabs       — [{ id, label, icon?, component: React.lazy(() => import(...)) }]
@@ -9,7 +14,11 @@ import React, { useState, Suspense } from 'react';
  *   title      — page title
  */
 export default function TabShell({ tabs = [], isDark = false, title = '' }) {
-  const [activeTab, setActiveTab] = useState(tabs[0]?.id || '');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const wanted = searchParams.get('tab');
+  const activeTab = tabs.some((t) => t.id === wanted) ? wanted : tabs[0]?.id || '';
+  // `replace` keeps the Back button as it was: it leaves the page, it does not walk back through tabs.
+  const setActiveTab = (id) => setSearchParams((params) => { params.set('tab', id); return params; }, { replace: true });
 
   const bgBase = isDark ? 'bg-gray-950' : 'bg-gray-50';
   const bgSurface = isDark ? 'bg-gray-900/60' : 'bg-white/70';

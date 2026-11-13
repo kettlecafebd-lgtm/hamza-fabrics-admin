@@ -31,7 +31,7 @@ const PAGE_COMMANDS = [
   { id: 'expense-tracker', label: 'Expense Tracker', path: '/expense-tracker', icon: '💸', category: 'Navigation', keywords: 'expense cost spending' },
   { id: 'order-report', label: 'Order Report', path: '/order-report', icon: '📋', category: 'Navigation', keywords: 'order report analytics' },
   { id: 'employee-report', label: 'Employee Report', path: '/employee-report', icon: '👨‍💼', category: 'Navigation', keywords: 'employee staff team' },
-  { id: 'brain', label: 'Brain Dashboard', path: '/admin/brain', icon: '🧠', category: 'Navigation', keywords: 'ai brain intelligence' },
+  { id: 'brain', label: 'Brain Dashboard', path: '/admin/command-center?tab=ai', icon: '🧠', category: 'Navigation', keywords: 'ai brain intelligence' },
   { id: 'crm', label: 'CRM Leads', path: '/admin/crm', icon: '📞', category: 'Navigation', keywords: 'crm leads sales pipeline' },
   { id: 'fraud', label: 'Fraud Checker', path: '/fraud-checker', icon: '🛡️', category: 'Navigation', keywords: 'fraud security check' },
   { id: 'inbox', label: 'Unified Inbox', path: '/admin/inbox', icon: '💬', category: 'Navigation', keywords: 'inbox message chat communication' },

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import API_BASE_URL from '../config/api';
 import toast from 'react-hot-toast';
@@ -8,40 +8,91 @@ import { Users, Download, Search, ChevronDown, Edit, ShoppingBag, Trash2, X } fr
 
 export default function CustomerList() {
   const [customers, setCustomers] = useState([]);
-  const [filteredCustomers, setFilteredCustomers] = useState([]);
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
   const [searchTerm, setSearchTerm] = useState('');
+  const [searchInput, setSearchInput] = useState('');
   const [isFilterOpen, setIsFilterOpen] = useState(false);
   const [activeFilter, setActiveFilter] = useState('All');
+
+  // Server-side paging. Falls back to client-side paging when the backend
+  // does not return a `total` (i.e. does not support ?page/?limit yet).
+  const pageSize = 10;
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [serverPaginated, setServerPaginated] = useState(false);
 
   const [showEditModal, setShowEditModal] = useState(false);
   const [editData, setEditData] = useState(null);
   const [isSaving, setIsSaving] = useState(false);
 
-  const fetchCustomers = async () => {
+  const fetchCustomers = async (signal, { paged = false } = {}) => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/customers`, {
-        headers: { 'Authorization': `Bearer ${getToken()}` }
+      const params = new URLSearchParams({ page: String(page), limit: String(pageSize) });
+      if (paged) {
+        if (searchTerm) params.set('search', searchTerm);
+        if (activeFilter !== 'All') params.set('type', activeFilter);
+        params.set('fields', 'list');
+      }
+      const response = await fetch(`${API_BASE_URL}/api/customers?${params}`, {
+        headers: { 'Authorization': `Bearer ${getToken()}` },
+        signal,
       });
       const result = await response.json();
       if (result.success) {
-        setCustomers(result.data);
+        setCustomers(result.data || []);
+        // `total` is only present on a paging-aware backend.
+        if (typeof result.total === 'number') {
+          setTotal(result.total);
+          setServerPaginated(true);
+        }
       }
     } catch (error) {
-      console.error('Error fetching customers:', error);
+      if (error.name !== 'AbortError') console.error('Error fetching customers:', error);
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
   };
 
-  useEffect(() => { fetchCustomers(); }, []);
-
+  // Typing is local-only; the request fires after the user pauses.
   useEffect(() => {
+    const t = setTimeout(() => {
+      setSearchInput(searchTerm.trim());
+      setPage(1);
+    }, 350);
+    return () => clearTimeout(t);
+  }, [searchTerm]);
+
+  // NB: state updates above are deferred inside the timeout, so they never
+  // cascade synchronously from the effect body.
+
+  // Initial load (also the unpaged fallback path).
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchCustomers(controller.signal);
+    return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Paged reloads — only once the backend has proven it supports them.
+  useEffect(() => {
+    if (!serverPaginated) return;
+    const controller = new AbortController();
+    fetchCustomers(controller.signal, { paged: true });
+    return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, searchInput, activeFilter, serverPaginated]);
+
+  // Derived, not stored: in server mode the API already applied search + type +
+  // paging, so the rows are used verbatim. Otherwise filter/sort in the browser
+  // (the fallback path for a backend without paging support).
+  const filteredCustomers = useMemo(() => {
+    if (serverPaginated) return customers;
+
     let result = customers;
-    if (searchTerm) {
-      const term = searchTerm.toLowerCase();
+    if (searchInput) {
+      const term = searchInput.toLowerCase();
       result = result.filter(c =>
         (c.name && c.name.toLowerCase().includes(term)) ||
         (c.phone && c.phone.includes(term)) ||
@@ -52,8 +103,8 @@ export default function CustomerList() {
     else if (activeFilter === 'Regular') result = result.filter(c => c.customer_type?.toLowerCase() === 'regular');
     else if (activeFilter === 'HasOrders') result = result.filter(c => Number(c.total_orders) > 0);
     else if (activeFilter === 'TopSpenders') result = [...result].sort((a, b) => Number(b.total_spent || 0) - Number(a.total_spent || 0));
-    setFilteredCustomers(result);
-  }, [customers, searchTerm, activeFilter]);
+    return result;
+  }, [customers, searchInput, activeFilter, serverPaginated]);
 
   const handleEdit = (customer) => { setEditData({ ...customer }); setShowEditModal(true); };
   const handleEditChange = (e) => { setEditData({ ...editData, [e.target.name]: e.target.value }); };
@@ -173,7 +224,11 @@ export default function CustomerList() {
             <h2 className="text-lg font-extrabold flex items-center gap-2">
               <span className="text-t-primary"><Users size={18} /></span> Customer Directory
             </h2>
-            <p className="text-xs text-t-muted mt-1 font-bold tracking-widest uppercase">{filteredCustomers.length} of {customers.length} total customers</p>
+            <p className="text-xs text-t-muted mt-1 font-bold tracking-widest uppercase">
+              {serverPaginated
+                ? `${filteredCustomers.length} of ${total} total customers`
+                : `${filteredCustomers.length} of ${customers.length} total customers`}
+            </p>
           </div>
 
           <div className="flex gap-3 w-full sm:w-auto relative">
@@ -221,11 +276,32 @@ export default function CustomerList() {
           emptyIcon={<Users size={48} className="text-t-primary/30" />}
           loading={loading}
           loadingMessage="Loading Customers..."
-          sortable={true}
-          paginated={true}
-          pageSize={10}
+          sortable={!serverPaginated}
+          paginated={!serverPaginated}
+          pageSize={pageSize}
           selectable={false}
         />
+
+        {/* Server-side pager — only rendered once the API proves it supports paging */}
+        {serverPaginated && total > pageSize && (
+          <div className="p-4 border-t border-t-border flex items-center justify-between">
+            <span className="text-xs text-t-muted">
+              Showing {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, total)} of {total}
+            </span>
+            <div className="flex gap-2">
+              <button
+                disabled={page === 1}
+                onClick={() => setPage(p => Math.max(1, p - 1))}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${page === 1 ? 'opacity-30 cursor-not-allowed' : 'hover:bg-t-primary/10 text-t-primary'}`}
+              >Previous</button>
+              <button
+                disabled={page * pageSize >= total}
+                onClick={() => setPage(p => p + 1)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${page * pageSize >= total ? 'opacity-30 cursor-not-allowed' : 'hover:bg-t-primary/10 text-t-primary'}`}
+              >Next</button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Edit Customer Modal */}

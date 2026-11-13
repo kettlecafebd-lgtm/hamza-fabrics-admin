@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useContext } from 'react';
 import { AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import API_BASE_URL from '../config/api';
+import { cachedFetch, CACHE_TTLS } from '../lib/dataCache';
 import { getToken } from '../utils/auth';
 import { ThemeContext } from '../context/ThemeContext';
 
@@ -26,15 +27,21 @@ const Dashboard = () => {
 
 
   // ===================== REAL DATA FETCHING =====================
-  const fetchDashboardData = async () => {
+  const fetchDashboardData = async ({ force = false } = {}) => {
     setLoading(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/analytics?filter=${globalDateFilter}`, {
+      const token = getToken();
+      // Numbers may have moved between two visits, but not within 30 s — and a
+      // tab-away/tab-back used to pay for the full analytics payload again.
+      const response = await cachedFetch(`${API_BASE_URL}/api/analytics?filter=${globalDateFilter}`, {
         method: 'GET',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${getToken()}`
-        }
+          'Authorization': `Bearer ${token}`
+        },
+        token,
+        ttl: CACHE_TTLS.analytics,
+        force,
       });
       
       const result = await response.json();

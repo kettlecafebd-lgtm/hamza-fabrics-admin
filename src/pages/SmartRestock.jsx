@@ -3,6 +3,7 @@ import { ThemeContext } from '../context/ThemeContext';
 import { Link } from 'react-router-dom';
 import API_BASE_URL from '../config/api';
 import { getToken } from '../utils/auth';
+import { thumbUrl } from '../utils/imageUrl';
 
 const STATUS_CONFIG = {
   out_of_stock: { label: 'Out of Stock', cls: 'bg-red-500/10 text-red-500 border-red-500/20' },
@@ -388,7 +389,7 @@ const SmartRestock = () => {
                             <div className="flex items-center gap-3">
                               {p.imageUrl && (
                                 <div className={`w-9 h-9 ${bgCard} rounded-md overflow-hidden shrink-0 border border-gray-600`}>
-                                  <img src={p.imageUrl} className="w-full h-full object-cover" alt="" />
+                                  <img src={thumbUrl(p.imageUrl, 72)} loading="lazy" decoding="async" className="w-full h-full object-cover" alt="" />
                                 </div>
                               )}
                               <div>

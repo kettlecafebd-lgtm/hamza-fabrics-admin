@@ -103,12 +103,20 @@ export default function CommandMenu({ open, onClose }) {
       return;
     }
 
+    const controller = new AbortController();
+
     const timer = setTimeout(async () => {
       setLoading(true);
       try {
         const token = localStorage.getItem('adminToken') || '';
-        const res = await fetch(`${API_BASE_URL}/api/products`, {
+        // Ask the server for matches instead of downloading the whole catalogue
+        // per keystroke and filtering it in the browser. `limit=8` is what the
+        // palette can display. If the backend ignores these params we still get
+        // the old behaviour — the fuzzy filter below is a harmless safety net.
+        const params = new URLSearchParams({ search: query, limit: '8', fields: 'search' });
+        const res = await fetch(`${API_BASE_URL}/api/products?${params}`, {
           headers: { Authorization: `Bearer ${token}` },
+          signal: controller.signal,
         });
         const json = await res.json();
         if (json.success) {
@@ -119,11 +127,13 @@ export default function CommandMenu({ open, onClose }) {
           );
           setProducts(filtered.slice(0, 8)); // Max 8 product results
         }
-      } catch {}
-      setLoading(false);
+      } catch (err) {
+        if (err.name !== 'AbortError') console.error('[CommandMenu] product search failed:', err);
+      }
+      if (!controller.signal.aborted) setLoading(false);
     }, 200);
 
-    return () => clearTimeout(timer);
+    return () => { clearTimeout(timer); controller.abort(); };
   }, [query, open]);
 
   // ── Combine results ──

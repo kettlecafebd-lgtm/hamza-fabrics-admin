@@ -57,7 +57,12 @@ export default function Orders() {
   }, [visibleColumns]);
 
   const savedLimit = parseInt(localStorage.getItem('ordersPerPage')) || 50;
-  const [meta, setMeta] = useState({ page: 1, limit: savedLimit });
+  const [meta, setMeta] = useState({ page: 1, limit: savedLimit, total: 0 });
+  // True once the API proves it understands ?page/?limit (i.e. returns `total`).
+  // Until then we keep the historical fetch-everything + filter-in-browser path.
+  const [serverPaginated, setServerPaginated] = useState(false);
+  const [searchDebounced, setSearchDebounced] = useState('');
+  const paginationReady = useRef(false);
   const [openActionId, setOpenActionId] = useState(null);
   
   const [showOrderModal, setShowOrderModal] = useState(false);
@@ -97,14 +102,40 @@ export default function Orders() {
 
 
 
-  const fetchData = async () => {
+  const buildOrderParams = () => {
+    const params = new URLSearchParams({ page: String(meta.page), limit: String(meta.limit) });
+
+    // Ask for the list projection: no billing/metrics blobs, no line-item JSON.
+    params.set('fields', 'list');
+    if (activeTab !== 'All') params.set('status', activeTab.toLowerCase().replace(' ', '_'));
+    if (searchDebounced) params.set('search', searchDebounced);
+    if (sortConfig.key) params.set('sort', sortConfig.key);
+
+    const f = advancedFilters;
+    if (f.printStatus !== 'All') params.set('print_status', f.printStatus);
+    if (f.uploadStatus !== 'All') params.set('upload_status', f.uploadStatus);
+    if (f.orderSource !== 'All Sources') params.set('source', f.orderSource);
+    if (f.productSku) params.set('product_sku', f.productSku);
+    if (f.productName) params.set('product_name', f.productName);
+    if (f.minQty) params.set('min_qty', f.minQty);
+    if (f.maxQty) params.set('max_qty', f.maxQty);
+    if (f.fromDate) params.set('from', f.fromDate);
+    if (f.toDate) params.set('to', f.toDate);
+
+    return params;
+  };
+
+  const fetchData = async (signal) => {
     try {
       setLoading(true);
       const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${getToken()}` };
+      const params = buildOrderParams();
       const [ordersRes, couriersRes, productsRes] = await Promise.all([
-        fetch(`${API_BASE_URL}/api/orders`, { headers }),
-        fetch(`${API_BASE_URL}/api/courier/active`, { headers }),
-        fetch(`${API_BASE_URL}/api/products`)
+        fetch(`${API_BASE_URL}/api/orders?${params}`, { headers, signal }),
+        fetch(`${API_BASE_URL}/api/courier/active`, { headers, signal }),
+        // `orderform` projection must include variants (the modal flattens them
+        // for size selection) — see EGRESS_AUDIT.md §1.3.
+        fetch(`${API_BASE_URL}/api/products?limit=500&fields=orderform`, { signal })
       ]);
 
       const ordersResult = await ordersRes.json();
@@ -116,24 +147,89 @@ export default function Orders() {
         setCouriers(couriersResult.data);
         if (couriersResult.data.length > 0) defaultCourier = couriersResult.data[0].name;
       }
-      
+
       if (ordersResult.success) {
-        setOrders(ordersResult.data);
+        const rows = ordersResult.data || [];
+        setOrders(rows);
+
+        if (typeof ordersResult.total === 'number') {
+          setServerPaginated(true);
+          setMeta(m => ({ ...m, total: ordersResult.total }));
+        } else if (rows.length >= meta.limit) {
+          // Backend ignored ?limit (or honours it but never returns `total`).
+          // We stay in client-side mode so nothing is silently truncated, but
+          // say so loudly — this is the line that costs the most egress.
+          console.warn(
+            '[Orders] /api/orders returned %d rows with no `total`. ' +
+            'Server-side paging is inactive — see EGRESS_AUDIT.md §2.1.',
+            rows.length
+          );
+        }
+
         const initialCouriers = {};
-        ordersResult.data.forEach(o => { if(!o.tracking_code) initialCouriers[o.id] = defaultCourier; });
+        rows.forEach(o => { if (!o.tracking_code) initialCouriers[o.id] = defaultCourier; });
         setSelectedCouriers(initialCouriers);
       }
-      if (productsResult.success) setProducts(productsResult.data);
-    } catch (err) { setError('Server connection error.'); } finally { setLoading(false); }
+      if (productsResult.success) setProducts(productsResult.data || []);
+    } catch (err) {
+      if (err.name !== 'AbortError') setError('Server connection error.');
+    } finally {
+      if (!signal?.aborted) setLoading(false);
+    }
   };
 
-  useEffect(() => { 
-    fetchData(); 
+  // Initial load.
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchData(controller.signal);
     const savedSettings = localStorage.getItem('siteSettings');
-    if(savedSettings) setSiteSettings(JSON.parse(savedSettings));
+    if (savedSettings) setSiteSettings(JSON.parse(savedSettings));
+    return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  let filteredOrders = Array.isArray(orders) ? orders.filter(order => {
+  // Search is local-only while typing; query it after the user pauses.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setSearchDebounced(searchQuery.trim());
+      setMeta(m => (m.page === 1 ? m : { ...m, page: 1 }));
+    }, 350);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
+
+  // Page / page-size changes: only meaningful when the server is doing the paging.
+  useEffect(() => {
+    if (!serverPaginated) return;
+    if (!paginationReady.current) { paginationReady.current = true; return; } // page 1 already loaded
+    const controller = new AbortController();
+    fetchData(controller.signal);
+    return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [meta.page, meta.limit, serverPaginated]);
+
+  // Tab / sort / advanced-filter changes: re-query once the server can filter.
+  useEffect(() => {
+    if (!serverPaginated) return;              // legacy mode filters client-side
+    if (!paginationReady.current) { paginationReady.current = true; return; }
+    if (meta.page !== 1) { setMeta(m => ({ ...m, page: 1 })); return; }
+    const controller = new AbortController();
+    fetchData(controller.signal);
+    return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    activeTab, sortConfig.key, searchDebounced,
+    advancedFilters.printStatus, advancedFilters.uploadStatus,
+    advancedFilters.orderSource, advancedFilters.productSku,
+    advancedFilters.productName, advancedFilters.minQty,
+    advancedFilters.maxQty, advancedFilters.fromDate, advancedFilters.toDate,
+  ]);
+
+  // In server mode the API has already applied the tab, search, advanced filters
+  // and sort. Applying them again here would filter a single page against itself
+  // and produce wrong counts — so the whole block is bypassed.
+  const serverMode = serverPaginated;
+
+  let filteredOrders = Array.isArray(orders) ? (serverMode ? orders : orders.filter(order => {
     const orderStatus = (order.status || 'pending').toLowerCase();
     const tabStatus = activeTab.toLowerCase().replace(' ', '_'); 
     let matchesTab = false;
@@ -181,9 +277,9 @@ export default function Orders() {
     }
 
     return true;
-  }) : [];
+  })) : [];
 
-  filteredOrders.sort((a, b) => {
+  if (!serverMode) filteredOrders.sort((a, b) => {
     if(sortConfig.key === 'date_desc') return new Date(b.date) - new Date(a.date);
     if(sortConfig.key === 'date_asc') return new Date(a.date) - new Date(b.date);
     if(sortConfig.key === 'amount_desc') return parseFloat(b.total) - parseFloat(a.total);
@@ -191,19 +287,23 @@ export default function Orders() {
     return 0;
   });
 
-  const totalPages = Math.ceil(filteredOrders.length / meta.limit);
+  const totalPages = serverMode
+    ? Math.max(1, Math.ceil((meta.total || 0) / meta.limit))
+    : Math.ceil(filteredOrders.length / meta.limit);
   const indexOfLastOrder = meta.page * meta.limit;
   const indexOfFirstOrder = indexOfLastOrder - meta.limit;
-  const currentOrders = filteredOrders.slice(indexOfFirstOrder, indexOfLastOrder);
+  const currentOrders = serverMode
+    ? filteredOrders                                  // already one page
+    : filteredOrders.slice(indexOfFirstOrder, indexOfLastOrder);
 
   const handleLimitChange = (e) => {
     const newLimit = parseInt(e.target.value);
     localStorage.setItem('ordersPerPage', newLimit);
-    setMeta({ page: 1, limit: newLimit });
+    setMeta(m => ({ ...m, page: 1, limit: newLimit }));
   };
   
   const handlePageChange = (newPage) => {
-    if (newPage >= 1 && newPage <= totalPages) setMeta({ ...meta, page: newPage });
+    if (newPage >= 1 && newPage <= totalPages) setMeta(m => ({ ...m, page: newPage }));
   };
 
   const handleSelectAll = () => {
@@ -290,17 +390,46 @@ export default function Orders() {
     fetchData();
   };
 
+  // ── Line items on demand ───────────────────────────────────────────────────
+  // List rows are fetched with `fields=list`, so they may only carry
+  // `items_count` instead of the full `products` blob. Anything that needs the
+  // actual line items (edit modal, thermal stickers) hydrates the single order.
+  const ensureOrderItems = async (order) => {
+    let items = [];
+    try {
+      items = typeof order.products === 'string' ? JSON.parse(order.products) : (order.products || []);
+    } catch { items = []; }
+
+    if (items.length > 0) return { ...order, products: items };
+    if (!(Number(order.items_count) > 0)) return { ...order, products: [] };
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/orders/${order.id}`, {
+        headers: { Authorization: `Bearer ${getToken()}` },
+      });
+      const json = await res.json();
+      const full = json?.data || json;
+      const loaded = typeof full?.products === 'string' ? JSON.parse(full.products) : (full?.products || []);
+      return { ...order, ...(full || {}), products: loaded };
+    } catch (err) {
+      console.error('[Orders] could not load order detail for', order.id, err);
+      return { ...order, products: [] };
+    }
+  };
+
   // Module Z: Thermal Sticker Print Handlers
-  const handlePrintSingleSticker = (order) => {
-    setStickerOrders([order]);
+  const handlePrintSingleSticker = async (order) => {
+    const full = await ensureOrderItems(order);
+    setStickerOrders([full]);
     setActiveStickerIndex(0);
     setOpenActionId(null);
     setTimeout(() => handleStickerPrint(), 200);
   };
 
-  const handleBulkStickerPrint = () => {
+  const handleBulkStickerPrint = async () => {
     if (selectedOrders.length === 0) return toast.error("Please select orders first!");
-    const ordersToPrint = orders.filter(o => selectedOrders.includes(o.id));
+    const picked = orders.filter(o => selectedOrders.includes(o.id));
+    const ordersToPrint = await Promise.all(picked.map(ensureOrderItems));
     setStickerOrders(ordersToPrint);
     setActiveStickerIndex(0);
     setTimeout(() => handleStickerPrint(), 200);
@@ -308,7 +437,12 @@ export default function Orders() {
 
   // Keep old print for backward compatibility (invoice view)
   const triggerPrint = () => { setIsPrinting(true); setTimeout(() => { window.print(); }, 800); };
-  const handlePrintSingle = (order) => { setPrintOrders([order]); setOpenActionId(null); triggerPrint(); };
+  const handlePrintSingle = async (order) => {
+    const full = await ensureOrderItems(order);
+    setPrintOrders([full]);
+    setOpenActionId(null);
+    triggerPrint();
+  };
 
   const handleBulkPrint = (type) => {
     if (selectedOrders.length === 0) return toast.error("Please select orders first!");
@@ -371,11 +505,13 @@ export default function Orders() {
     setOpenActionId(null);
   };
 
-  const openEditModal = (order) => {
+  const openEditModal = async (order) => {
     setModalMode('edit');
-    let parsedItems = [];
-    try { parsedItems = typeof order.products === 'string' ? JSON.parse(order.products) : (order.products || []); } catch (e) { parsedItems = []; }
-    
+    setOpenActionId(null);
+
+    const hydrated = await ensureOrderItems(order);
+    const parsedItems = hydrated.products || [];
+
     const formattedItems = parsedItems.map(p => {
       const masterProduct = products.find(mp => mp.id == (p.id || p.product_id || p.productId));
       return {
@@ -393,7 +529,7 @@ export default function Orders() {
       city: '', zone: '', areaGeo: '', items: formattedItems, billing: { discount: order.discount || 0, advance: order.advance || 0, subTotal: subTotal, deliveryCharge: order.delivery_charge || 150, total: order.total },
       metrics: order.customer?.metrics || null
     });
-    setShowOrderModal(true); setOpenActionId(null);
+    setShowOrderModal(true);
   };
 
   const submitOrderForm = async (e) => {

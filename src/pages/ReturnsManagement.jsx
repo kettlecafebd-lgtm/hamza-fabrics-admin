@@ -24,6 +24,8 @@ export default function ReturnsManagement() {
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState('all');
   const [search, setSearch] = useState('');
+  // Debounced copy of `search` — prevents one stats+list refetch per keystroke.
+  const [searchTerm, setSearchTerm] = useState('');
   const [page, setPage] = useState(0);
   const [selectedRequest, setSelectedRequest] = useState(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -41,7 +43,7 @@ export default function ReturnsManagement() {
       const token = localStorage.getItem('adminToken');
       const params = new URLSearchParams({ limit: pageSize, offset: page * pageSize });
       if (statusFilter !== 'all') params.set('status', statusFilter);
-      if (search) params.set('search', search);
+      if (searchTerm) params.set('search', searchTerm);
       const [statsRes, listRes] = await Promise.all([
         fetch(`${API_BASE_URL}/api/rma/stats`, { headers: { Authorization: `Bearer ${token}` } }),
         fetch(`${API_BASE_URL}/api/rma/return-requests?${params}`, { headers: { Authorization: `Bearer ${token}` } }),
@@ -54,7 +56,13 @@ export default function ReturnsManagement() {
     setLoading(false);
   };
 
-  useEffect(() => { fetchRequests(); }, [statusFilter, search, page]);
+  // Typing is local-only; the request fires 350ms after the user stops typing.
+  useEffect(() => {
+    const t = setTimeout(() => setSearchTerm(search.trim()), 350);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  useEffect(() => { fetchRequests(); }, [statusFilter, searchTerm, page]);
 
   const handleStatusChange = async (id, newStatus, note) => {
     setActionLoading(true);

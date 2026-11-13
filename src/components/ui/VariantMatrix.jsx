@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import InlineEditableCell from './InlineEditableCell';
 import StatusBadge, { StockIndicator } from './StatusBadge';
+import { thumbUrl, srcSet, IMAGE_PLACEHOLDER } from '../../utils/imageUrl';
 
 /**
  * VariantMatrix — Premium Accordion Table for Product & Variant Management
@@ -122,7 +123,11 @@ export default function VariantMatrix({
                             onClick={() => onViewImage?.(
                               p.image_url.startsWith('http') ? p.image_url : `${API_BASE_URL}${p.image_url}`
                             )}
-                            src={p.image_url.startsWith('http') ? p.image_url : `${API_BASE_URL}${p.image_url}`}
+                            src={thumbUrl(p.image_url.startsWith('http') ? p.image_url : `${API_BASE_URL}${p.image_url}`, 96)}
+                            srcSet={srcSet(p.image_url.startsWith('http') ? p.image_url : `${API_BASE_URL}${p.image_url}`, [96, 192])}
+                            sizes="48px"
+                            loading="lazy"
+                            decoding="async"
                             className="w-full h-full object-contain cursor-pointer hover:scale-110 transition-transform duration-300"
                             alt={p.name}
                           />
@@ -271,13 +276,17 @@ export default function VariantMatrix({
                                               onClick={() => onViewImage?.(
                                                 p.image_url
                                                   ? (p.image_url.startsWith('http') ? p.image_url : `${API_BASE_URL}${p.image_url}`)
-                                                  : 'https://via.placeholder.com/36'
+                                                  : IMAGE_PLACEHOLDER
                                               )}
-                                              src={
-                                                p.image_url
-                                                  ? (p.image_url.startsWith('http') ? p.image_url : `${API_BASE_URL}${p.image_url}`)
-                                                  : 'https://via.placeholder.com/36'
-                                              }
+                                              src={thumbUrl(p.image_url
+                                                ? (p.image_url.startsWith('http') ? p.image_url : `${API_BASE_URL}${p.image_url}`)
+                                                : IMAGE_PLACEHOLDER, 72)}
+                                              srcSet={srcSet(p.image_url
+                                                ? (p.image_url.startsWith('http') ? p.image_url : `${API_BASE_URL}${p.image_url}`)
+                                                : IMAGE_PLACEHOLDER, [72, 144])}
+                                              sizes="36px"
+                                              loading="lazy"
+                                              decoding="async"
                                               className="w-full h-full object-contain cursor-pointer hover:scale-110 transition-transform"
                                               alt="variant"
                                             />

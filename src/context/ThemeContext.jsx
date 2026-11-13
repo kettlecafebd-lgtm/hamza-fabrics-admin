@@ -1,5 +1,5 @@
 import React, { createContext, useState, useEffect, useCallback, useContext } from 'react';
-import API_BASE_URL from '../config/api';
+import { getSystemSettings } from '../lib/systemSettings';
 
 export const ThemeContext = createContext();
 
@@ -41,20 +41,21 @@ export const ThemeProvider = ({ children }) => {
   }, [adminTheme]);
 
   useEffect(() => {
-    fetch(`${API_BASE_URL}/api/settings/system`)
-      .then(res => res.json())
+    let cancelled = false;
+    // De-duplicated read: the sidebar and login screen ask for the same payload.
+    getSystemSettings()
       .then(data => {
-        if(data.success && data.data) {
-          if(data.data.admin_theme) {
-            setAdminTheme(data.data.admin_theme);
-            localStorage.setItem('hamzabi-admin-theme', data.data.admin_theme);
-          }
-          if(data.data.shop_theme) {
-            setShopTheme(data.data.shop_theme);
-          }
+        if (cancelled || !data.success || !data.data) return;
+        if (data.data.admin_theme) {
+          setAdminTheme(data.data.admin_theme);
+          localStorage.setItem('hamzabi-admin-theme', data.data.admin_theme);
+        }
+        if (data.data.shop_theme) {
+          setShopTheme(data.data.shop_theme);
         }
       })
       .catch(err => console.error("Failed to load theme from DB:", err));
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
@@ -71,8 +72,7 @@ export const ThemeProvider = ({ children }) => {
   }, []);
 
   const refreshShopTheme = useCallback(() => {
-    fetch(`${API_BASE_URL}/api/settings/system`)
-      .then(res => res.json())
+    getSystemSettings({ force: true })
       .then(data => {
         if (data.success && data.data && data.data.shop_theme) {
           setShopTheme(data.data.shop_theme);

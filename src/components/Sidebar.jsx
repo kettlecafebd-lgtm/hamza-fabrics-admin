@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { LayoutDashboard, ShoppingCart, Package, Users, Monitor, BarChart3, Settings, Globe } from 'lucide-react';
-import API_BASE_URL from '../config/api';
+import { getSystemSettings } from '../lib/systemSettings';
 
 /**
  * Sidebar V2.0 — Restructured for HamzaBI V2.0
@@ -29,13 +29,14 @@ const Sidebar = () => {
   const isSectionOpen = (key, activeOnRoute) => openSections[key] !== undefined ? openSections[key] : activeOnRoute;
 
   useEffect(() => {
-    fetch(`${API_BASE_URL}/api/settings/system`)
-      .then(res => res.json())
+    let cancelled = false;
+    getSystemSettings()
       .then(data => {
-        if (data.success && data.data) {
-          setBrand({ firstName: data.data.brand_first_name || 'Hamza', lastName: data.data.brand_last_name || 'Fabrics', tagline: data.data.tagline || 'Intelligent Commerce' });
-        }
-      }).catch(() => {});
+        if (cancelled || !data.success || !data.data) return;
+        setBrand({ firstName: data.data.brand_first_name || 'Hamza', lastName: data.data.brand_last_name || 'Fabrics', tagline: data.data.tagline || 'Intelligent Commerce' });
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
   }, []);
 
   const linkClass = (path) => {

@@ -9,6 +9,7 @@ import {
 
 import { ThemeContext } from '../../context/ThemeContext'; 
 import API_BASE_URL from '../../config/api';
+import { thumbUrl, srcSet, IMAGE_PLACEHOLDER } from '../../utils/imageUrl';
 import toast from 'react-hot-toast';
 
 export default function OrderTable({
@@ -212,6 +213,17 @@ export default function OrderTable({
                 {visibleColumns.products && (
                   <td className="py-4 px-4 align-middle border-r border-t-border min-w-[350px]">
                     <div className="space-y-3">
+                      {/* List payloads may omit the line-item blob entirely (fields=list).
+                          Fall back to the server-side count instead of rendering nothing. */}
+                      {displayedProducts.length === 0 && Number(order.items_count) > 0 && (
+                        <div className="flex items-center gap-2 text-t-muted">
+                          <ShoppingBag size={14} className="opacity-60" />
+                          <span className="text-[12px] font-bold text-t-main">
+                            {order.items_count} item{Number(order.items_count) === 1 ? '' : 's'}
+                          </span>
+                          <span className="text-[10px] opacity-60">— open the order to view lines</span>
+                        </div>
+                      )}
                       {displayedProducts.map((prod, i) => {
                         const skuRaw = prod.sku_code || prod.sku;
                         const skuDisplay = (!skuRaw || String(skuRaw) === 'NaN' || String(skuRaw) === 'undefined') ? 'N/A' : skuRaw;
@@ -219,7 +231,7 @@ export default function OrderTable({
                         return (
                           <div key={i} className="flex gap-3 items-center">
                             <div className="relative shrink-0">
-                               <img src={prod.image || 'https://via.placeholder.com/40'} alt="" className="w-10 h-10 rounded-md border border-t-border object-cover cursor-pointer hover:opacity-80 transition-opacity" onClick={() => setEnlargedImage(prod.image)} />
+                               <img src={thumbUrl(prod.image, 80) || IMAGE_PLACEHOLDER} srcSet={srcSet(prod.image, [80, 160])} sizes="40px" alt="" loading="lazy" decoding="async" width="40" height="40" className="w-10 h-10 rounded-md border border-t-border object-cover cursor-pointer hover:opacity-80 transition-opacity" onClick={() => setEnlargedImage(prod.image)} />
                                <div className={`absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-t-surface ${order.status === 'pending' ? 'bg-orange-500' : order.status === 'rts' ? 'bg-blue-500' : 'bg-green-500'}`}></div>
                             </div>
                             <div className="flex-1 flex justify-between items-center gap-4 text-t-main">

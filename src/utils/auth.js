@@ -41,4 +41,7 @@ export const jsonAuthHeaders = () => ({
  */
 export const clearAuth = () => {
   localStorage.removeItem(TOKEN_KEY);
+  // Imported lazily so this module stays dependency-free for callers that only
+  // need `getToken()`. Cached GET responses belong to the session that made them.
+  import('../lib/dataCache').then(({ clearCache }) => clearCache()).catch(() => {});
 };

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useContext } from 'react';
 import { ThemeContext } from '../context/ThemeContext';
 import { useNavigate } from 'react-router-dom';
 import API_BASE_URL from '../config/api';
+import { getSystemSettings } from '../lib/systemSettings';
 
 const Login = () => {
   const { shopTheme, isShopDark } = useContext(ThemeContext);
@@ -27,18 +28,18 @@ const Login = () => {
   });
 
   useEffect(() => {
-    fetch(`${API_BASE_URL}/api/settings/system`)
-      .then(res => res.json())
+    let cancelled = false;
+    getSystemSettings()
       .then(data => {
-        if (data.success && data.data) {
-          setBrand({
-            firstName: data.data.brand_first_name || 'KING',
-            lastName: data.data.brand_last_name || 'AI',
-            tagline: data.data.tagline || 'Intelligent Commerce Platform'
-          });
-        }
+        if (cancelled || !data.success || !data.data) return;
+        setBrand({
+          firstName: data.data.brand_first_name || 'KING',
+          lastName: data.data.brand_last_name || 'AI',
+          tagline: data.data.tagline || 'Intelligent Commerce Platform'
+        });
       })
       .catch(err => console.error("Failed to fetch brand settings:", err));
+    return () => { cancelled = true; };
   }, []);
 
   // Module U: Generate browser fingerprint for device trust

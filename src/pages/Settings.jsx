@@ -1,10 +1,17 @@
-import React, { useState, useEffect, useContext } from 'react';
+import React, { useState, useEffect, useContext, useRef } from 'react';
 import { ThemeContext } from '../context/ThemeContext'; 
 import API_BASE_URL from '../config/api';
 import toast from 'react-hot-toast';
+import { prepareImageForUpload, describeSaving } from '../lib/imageOptimize';
+import { appendStorageFields, deleteMedia } from '../lib/mediaClient';
+import { cachedFetch, invalidateCache, CACHE_TTLS } from '../lib/dataCache';
 
 export default function Settings() {
   const [loading, setLoading] = useState(false);
+
+  // Objects replaced in this session. Released only once the configuration is
+  // actually published — uploading here must not break what is live today.
+  const pendingMediaDeletes = useRef([]);
   const [activeTab, setActiveTab] = useState('General');
   const [envKeys, setEnvKeys] = useState([]);
   const [envLoading, setEnvLoading] = useState(false);
@@ -83,8 +90,12 @@ export default function Settings() {
       }));
     }
 
-    fetch(`${API_BASE_URL}/api/settings/system`, {
-      headers: { 'Authorization': `Bearer ${localStorage.getItem('adminToken')}` }
+    const adminToken = localStorage.getItem('adminToken');
+
+    cachedFetch(`${API_BASE_URL}/api/settings/system`, {
+      headers: { 'Authorization': `Bearer ${adminToken}` },
+      token: adminToken,
+      ttl: CACHE_TTLS.reference,
     })
     .then(res => res.json())
     .then(data => {
@@ -122,8 +133,10 @@ export default function Settings() {
     })
     .catch(err => console.error("Failed to fetch system settings:", err));
 
-    fetch(`${API_BASE_URL}/api/settings/env`, {
-      headers: { 'Authorization': `Bearer ${localStorage.getItem('adminToken')}` }
+    cachedFetch(`${API_BASE_URL}/api/settings/env`, {
+      headers: { 'Authorization': `Bearer ${adminToken}` },
+      token: adminToken,
+      ttl: CACHE_TTLS.reference,
     })
     .then(res => res.json())
     .then(data => {
@@ -134,8 +147,32 @@ export default function Settings() {
 
   const handleImageUpload = async (file, fieldName, index = null) => {
     if (!file) return;
+
+    // Hero/banner images are the largest assets in the storefront: cap them at
+    // 1200 px / WebP q0.80 before they ever reach storage.
+    let prepared;
+    let saving;
+    try {
+      const result = await prepareImageForUpload(file, 'settings');
+      prepared = result.file;
+      saving = describeSaving(result.originalBytes, result.bytes);
+    } catch (err) {
+      toast.error(err.message || 'That image is too large.');
+      return;
+    }
+
     const formData = new FormData();
-    formData.append('image', file);
+    formData.append('image', prepared);
+    appendStorageFields(formData, prepared);
+
+    // Remember what this slot pointed at so the old object can be cleaned up.
+    const previousUrl = fieldName === 'heroImages' ? settings.heroImages?.[index]
+      : fieldName === 'heroMobileImages' ? settings.heroMobileImages?.[index]
+      : fieldName === 'footerImages' ? settings.footerImages?.[index]
+      : fieldName === 'logoUrl' ? settings.logoUrl
+      : fieldName === 'faviconUrl' ? settings.faviconUrl
+      : null;
+    if (previousUrl) formData.append('previous_image_url', previousUrl);
 
     try {
       const response = await fetch(`${API_BASE_URL}/api/upload-image`, { 
@@ -146,6 +183,12 @@ export default function Settings() {
       const data = await response.json();
       if(data.success) {
         updateField(fieldName, data.url, index);
+        if (saving) toast.success(`Optimised: ${saving}`, { duration: 2500 });
+        // Uploading only edits local state — nothing is published until Save.
+        // Queue the replaced object; handleSave() releases it after a real commit.
+        if (previousUrl && previousUrl !== data.url) {
+          pendingMediaDeletes.current.push(previousUrl);
+        }
       } else {
         toast.error('Upload failed: ' + data.message);
       }
@@ -239,6 +282,20 @@ export default function Settings() {
   const updateDeliveryPartner = (id, field, value) => setSettings({ ...settings, deliveryPartners: settings.deliveryPartners.map(dp => dp.id === id ? { ...dp, [field]: value } : dp) });
   const removeDeliveryPartner = (id) => setSettings({ ...settings, deliveryPartners: settings.deliveryPartners.filter(dp => dp.id !== id) });
 
+  const flushPendingMediaDeletes = () => {
+    const queued = pendingMediaDeletes.current;
+    pendingMediaDeletes.current = [];
+    if (!queued.length) return;
+    let serialized = '';
+    try { serialized = JSON.stringify(settings); } catch { serialized = ''; }
+    const orphans = [...new Set(queued)].filter(
+      (url) => typeof url === 'string' && url && !serialized.includes(url)
+    );
+    if (orphans.length) {
+      deleteMedia(orphans, { apiBase: API_BASE_URL, token: localStorage.getItem('adminToken') });
+    }
+  };
+
   const handleSave = async () => {
     setLoading(true);
     try {
@@ -284,7 +341,10 @@ export default function Settings() {
 
       const result = await response.json();
       if(result.success) {
+        // The page that mounts next must not inherit the pre-save snapshot.
+        invalidateCache('/api/settings');
         toast.success('System Settings successfully published!');
+        flushPendingMediaDeletes();
       } else {
         toast.error('Failed to save backend settings: ' + result.message);
       }

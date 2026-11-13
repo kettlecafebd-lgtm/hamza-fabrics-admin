@@ -25,7 +25,7 @@ export default function AutoCallCenterReport() {
       const [statsRes, queueRes, logsRes] = await Promise.all([
         fetch(`${API_BASE_URL}/api/auto-call/stats`, { headers: h }),
         fetch(`${API_BASE_URL}/api/auto-call/queue?status=${queueFilter}`, { headers: h }),
-        fetch(`${API_BASE_URL}/api/auto-call/logs`, { headers: h })
+        fetch(`${API_BASE_URL}/api/auto-call/logs?limit=100`, { headers: h })
       ]);
       const s = await statsRes.json();
       const q = await queueRes.json();

@@ -1,9 +1,15 @@
-import React, { useState, useEffect, useContext, useCallback } from 'react';
+import React, { useState, useEffect, useContext, useCallback, useRef } from 'react';
 import API_BASE_URL from '../config/api';
 import { ThemeContext } from '../context/ThemeContext';
 import VariantMatrix from '../components/ui/VariantMatrix';
 import { GlassModal } from '../components/ui/GlassCard';
 import { getToken } from '../utils/auth';
+import { prepareImageForUpload, describeSaving } from '../lib/imageOptimize';
+import { appendStorageFields, deleteMedia, isUrlStillReferenced } from '../lib/mediaClient';
+import { cachedFetch, invalidateCache, CACHE_TTLS } from '../lib/dataCache';
+
+/** Rows per page. A paging-aware backend honours this; a legacy one returns all. */
+const PAGE_SIZE = 100;
 
 export default function Products() {
   const { adminTheme, isAdminDark } = useContext(ThemeContext);
@@ -20,6 +26,11 @@ export default function Products() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [toast, setToast] = useState({ show: false, message: '', type: 'success' });
   const [searchQuery, setSearchQuery] = useState('');
+  // Debounced copy of `searchQuery`: typing must not fire a request per keystroke.
+  const [serverSearch, setServerSearch] = useState('');
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [serverPaginated, setServerPaginated] = useState(false);
   const [expandedRows, setExpandedRows] = useState([]);
   const [showModal, setShowModal] = useState(false);
   const [imageViewer, setImageViewer] = useState({ open: false, url: '' });
@@ -43,13 +54,39 @@ export default function Products() {
     setTimeout(() => setToast({ show: false, message: '', type: 'success' }), 3000);
   };
 
-  const fetchData = async () => {
-    try {
-      const prodRes = await fetch(`${API_BASE_URL}/api/products`, { headers: { 'Authorization': `Bearer ${getToken()}` }});
-      const prodResult = await prodRes.json();
-      if (prodResult.success) setProducts(prodResult.data || []);
+  const fetchData = useCallback(async () => {
+    const token = getToken();
+    const headers = { 'Authorization': `Bearer ${token}` };
 
-      const taxonomyRes = await fetch(`${API_BASE_URL}/api/taxonomy`, { headers: { 'Authorization': `Bearer ${getToken()}` }});
+    // Only ask for the page we render. `search` is sent to the server while
+    // paging; a backend that ignores these params returns everything, and the
+    // `total` check below drops us back to client-side filtering.
+    const params = new URLSearchParams({ page: String(page), limit: String(PAGE_SIZE) });
+    if (serverSearch) params.set('search', serverSearch);
+
+    try {
+      const [prodRes, taxonomyRes] = await Promise.all([
+        cachedFetch(`${API_BASE_URL}/api/products?${params}`, {
+          headers, token, ttl: CACHE_TTLS.list,
+        }),
+        // Taxonomy changes a few times a year; a 10-minute TTL is generous.
+        cachedFetch(`${API_BASE_URL}/api/taxonomy`, { headers, token, ttl: CACHE_TTLS.reference }),
+      ]);
+
+      const prodResult = await prodRes.json();
+      if (prodResult.success) {
+        const rows = prodResult.data || [];
+        setProducts(rows);
+        if (typeof prodResult.total === 'number') {
+          setTotal(prodResult.total);
+          setServerPaginated(true);
+        } else {
+          // Legacy backend: no paging. Keep every row and filter in the browser.
+          setTotal(rows.length);
+          setServerPaginated(false);
+        }
+      }
+
       const taxonomyResult = await taxonomyRes.json();
       if (taxonomyResult.success) {
         setCategories(taxonomyResult.data.Categories || []);
@@ -57,9 +94,26 @@ export default function Products() {
       }
     } catch (err) { console.error("Fetch Error:", err); }
     setLoading(false);
-  };
+  }, [page, serverSearch]);
 
-  useEffect(() => { fetchData(); }, []);
+  // Mutations must never be answered from the cache: clear the affected URLs,
+  // then refetch. `fetchDataRef` lets the debounced refresher call the latest one.
+  const fetchDataRef = useRef(fetchData);
+  useEffect(() => { fetchDataRef.current = fetchData; }, [fetchData]);
+
+  const refreshProducts = useCallback(async () => {
+    invalidateCache('/api/products');
+    invalidateCache('/api/variants');
+    await fetchDataRef.current();
+  }, []);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  // 300 ms after typing stops, run the search. Page resets in the input handler.
+  useEffect(() => {
+    const timer = setTimeout(() => setServerSearch(searchQuery.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
 
   // Close image viewer on Escape
   useEffect(() => {
@@ -77,7 +131,11 @@ export default function Products() {
     const prod = products.find(p => p.id === id);
     if (prod && (!prod.variants || prod.variants.length === 0)) {
       try {
-        const res = await fetch(`${API_BASE_URL}/api/variants/${id}`);
+        const res = await cachedFetch(`${API_BASE_URL}/api/variants/${id}`, {
+          headers: { 'Authorization': `Bearer ${getToken()}` },
+          token: getToken(),
+          ttl: CACHE_TTLS.list,
+        });
         const json = await res.json();
         if (json.success && Array.isArray(json.variants)) {
           setProducts(prev => prev.map(p => p.id === id ? { ...p, variants: json.variants } : p));
@@ -173,9 +231,30 @@ export default function Products() {
 
   const handleDelete = async (id) => {
     if(!window.confirm("Are you sure you want to delete this product?")) return;
+    const target = products.find(p => p.id === id);
     try {
       const response = await fetch(`${API_BASE_URL}/api/products/${id}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${getToken()}` } });
-      if(response.ok) { fetchData(); showToast('Product Deleted!', 'success'); }
+      if(response.ok) {
+        // The DB row is gone; now release the objects it was pointing at.
+        // Anything another product still references is left alone.
+        const candidates = [
+          target?.image_url,
+          ...(target?.variants || []).map(v => v.image_url || v.image),
+        ].filter(Boolean);
+
+        const orphans = candidates.filter(url =>
+          !isUrlStillReferenced(url, products, ['image_url', 'image'], [id])
+        );
+
+        // With server paging we only hold one page, so a client-side sweep
+        // cannot prove an object is unreferenced. Leave it to the server-side GC.
+        if (!serverPaginated && orphans.length) {
+          deleteMedia(orphans, { apiBase: API_BASE_URL, token: getToken() });
+        }
+
+        refreshProducts();
+        showToast('Product Deleted!', 'success');
+      }
     } catch(err) { showToast('Delete failed!', 'error'); }
   };
 
@@ -215,6 +294,19 @@ export default function Products() {
   const updateReview = (id, field, value) => setReviews(reviews.map(r => r.id === id ? { ...r, [field]: value } : r));
   const removeReview = (id) => setReviews(reviews.filter(r => r.id !== id));
 
+  // Shared picker: `accept` is advisory only, so validate before we hold the
+  // file. Oversized files are still caught at submit time by the optimiser.
+  const handlePickImage = (e, onPick) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type?.startsWith('image/')) {
+      showToast('That is not an image — please choose a JPG, PNG or WebP.', 'error');
+      e.target.value = '';
+      return;
+    }
+    onPick(file);
+  };
+
   // 🟢 [FIXED]: FormData Submit Logic
   const handleAddProduct = async (e) => {
     e.preventDefault();
@@ -233,11 +325,29 @@ export default function Products() {
     submissionData.append('discount', baseProd.discount || 0);
     submissionData.append('stock_quantity', baseProd.stock || 0);
 
-    // 2. Main Image
+    // 2. Main Image — capped at 1200 px / WebP q0.80 before it leaves the browser.
+    const existingProduct = editingId ? products.find(p => p.id === editingId) : null;
+    const previousMainImage = existingProduct?.image_url || null;
+    let newMainImageUrl;
+    const replacedSideImages = [];
+    // Images this same product keeps. Two variants (or a variant and a review)
+    // can legitimately share one file; replacing one must not delete the other.
+    const keptSideImages = [];
+
     if (baseImage) {
-        submissionData.append('image', baseImage);
+        try {
+            const { file: prepared, originalBytes, bytes, changed } = await prepareImageForUpload(baseImage, 'product');
+            submissionData.append('image', prepared);
+            appendStorageFields(submissionData, prepared);
+            if (changed) console.info('[products] main image', describeSaving(originalBytes, bytes));
+        } catch (err) {
+            showToast(err.message || 'Main image is too large.', 'error');
+            setIsSubmitting(false);
+            return;
+        }
+        if (previousMainImage) submissionData.append('previous_image_url', previousMainImage);
     } else if (editingId) {
-        submissionData.append('image_url', products.find(p=>p.id===editingId)?.image_url || '');
+        submissionData.append('image_url', previousMainImage || '');
     }
 
     // 3. Variant JSON Array Processing
@@ -292,13 +402,27 @@ export default function Products() {
         // 🟢 FIX: Calculate exactly where extra variants start in the JSON array
         const extraVariantOffset = (baseProd.hasSizes && baseProd.sizes.length > 0) ? 1 : 0;
 
-        extraVariants.forEach((v, index) => {
-            if (v.imageFile) {
-                const correctIndex = extraVariantOffset + index;
-                // এখন variantImage_1, variantImage_2 ব্যাকএন্ডের লুপের সাথে ঠিক মিলবে
-                submissionData.append(`variantImage_${correctIndex}`, v.imageFile);
+        for (const [index, v] of extraVariants.entries()) {
+            if (!v.imageFile) {
+                if (v.existing_image_url) keptSideImages.push(v.existing_image_url);
+                continue;
             }
-        });
+            const correctIndex = extraVariantOffset + index;
+            try {
+                const { file: prepared } = await prepareImageForUpload(v.imageFile, 'variant');
+                // এখন variantImage_1, variantImage_2 ব্যাকএন্ডের লুপের সাথে ঠিক মিলবে
+                submissionData.append(`variantImage_${correctIndex}`, prepared);
+                submissionData.append(`variantImageContentType_${correctIndex}`, prepared.type || 'image/webp');
+                if (v.existing_image_url) {
+                    submissionData.append(`variantImagePrevious_${correctIndex}`, v.existing_image_url);
+                    replacedSideImages.push(v.existing_image_url);
+                }
+            } catch (err) {
+                showToast(err.message || `Variant image for ${v.color || 'variant'} is too large.`, 'error');
+                setIsSubmitting(false);
+                return;
+            }
+        }
     } else {
         submissionData.append('hasVariants', 'false');
     }
@@ -307,9 +431,25 @@ export default function Products() {
     const reviewsToSubmit = reviews.map(r => ({ name: r.name, comment: r.comment, existing_image: r.existing_image || null }));
     if(reviewsToSubmit.length > 0) {
         submissionData.append('reviewsData', JSON.stringify(reviewsToSubmit));
-        reviews.forEach((r, index) => {
-            if (r.imageFile) submissionData.append(`reviewImage_${index}`, r.imageFile);
-        });
+        for (const [index, r] of reviews.entries()) {
+            if (!r.imageFile) {
+                if (r.existing_image) keptSideImages.push(r.existing_image);
+                continue;
+            }
+            try {
+                const { file: prepared } = await prepareImageForUpload(r.imageFile, 'review');
+                submissionData.append(`reviewImage_${index}`, prepared);
+                submissionData.append(`reviewImageContentType_${index}`, prepared.type || 'image/webp');
+                if (r.existing_image) {
+                    submissionData.append(`reviewImagePrevious_${index}`, r.existing_image);
+                    replacedSideImages.push(r.existing_image);
+                }
+            } catch (err) {
+                showToast(err.message || 'A review image is too large.', 'error');
+                setIsSubmitting(false);
+                return;
+            }
+        }
     }
 
     const url = editingId ? `${API_BASE_URL}/api/products/${editingId}` : `${API_BASE_URL}/api/products`;
@@ -322,8 +462,27 @@ export default function Products() {
       });
       const result = await response.json();
       if (result.success) {
+          newMainImageUrl = result.image_url || result.data?.image_url || null;
+
+          // Only after the DB committed, only when the server confirmed a new URL,
+          // and only if nothing else still uses the old one.
+          const stillEditing = editingId ? [editingId] : [];
+          const oldUrls = [
+              ...(newMainImageUrl && previousMainImage !== newMainImageUrl ? [previousMainImage] : []),
+              ...replacedSideImages,
+          ].filter(Boolean);
+
+          const orphans = oldUrls.filter(url =>
+              !keptSideImages.includes(url) &&
+              !isUrlStillReferenced(url, products, ['image_url', 'image', 'existing_image'], stillEditing)
+          );
+          if (!serverPaginated && orphans.length) {
+            // (see handleDelete: a single page cannot prove non-reference)
+            deleteMedia(orphans, { apiBase: API_BASE_URL, token: getToken() });
+          }
+
           closeAndResetModal();
-          fetchData();
+          refreshProducts();
           showToast(editingId ? 'Product Updated!' : 'Product Saved!', 'success');
       } else {
           showToast(result.message || 'Action failed!', 'error');
@@ -348,7 +507,7 @@ export default function Products() {
         body: JSON.stringify({ is_active: !current })
       });
       const json = await res.json();
-      if (json.success) { fetchData(); showToast(json.message, 'success'); }
+      if (json.success) { refreshProducts(); showToast(json.message, 'success'); }
       else showToast(json.message || 'Toggle failed', 'error');
     } catch (err) { showToast('Toggle failed', 'error'); }
   };
@@ -360,7 +519,7 @@ export default function Products() {
         headers: { 'Authorization': `Bearer ${getToken()}` }
       });
       const json = await res.json();
-      if (json.success) { fetchData(); showToast('Product duplicated', 'success'); }
+      if (json.success) { refreshProducts(); showToast('Product duplicated', 'success'); }
       else showToast(json.message || 'Duplicate failed', 'error');
     } catch (err) { showToast('Duplicate failed', 'error'); }
   };
@@ -392,7 +551,7 @@ export default function Products() {
         body: JSON.stringify({ tags: tag })
       });
       const json = await res.json();
-      if (json.success) { fetchData(); showToast('Tag updated', 'success'); }
+      if (json.success) { refreshProducts(); showToast('Tag updated', 'success'); }
       else showToast(json.message || 'Tag failed', 'error');
     } catch (err) { showToast('Tag failed', 'error'); }
   };
@@ -403,7 +562,39 @@ export default function Products() {
     return () => window.removeEventListener('click', handleClickOutside);
   }, []);
 
-  const filteredProducts = products.filter(p => p.name?.toLowerCase().includes(searchQuery.toLowerCase()) || (p.sku_code || p.sku || '')?.toLowerCase().includes(searchQuery.toLowerCase()));
+  // When the backend paged *and* searched, the rows we hold are already the
+  // answer. Otherwise fall back to filtering the full list in the browser.
+  const filteredProducts = serverPaginated
+    ? products
+    : products.filter(p => p.name?.toLowerCase().includes(searchQuery.toLowerCase()) || (p.sku_code || p.sku || '')?.toLowerCase().includes(searchQuery.toLowerCase()));
+
+  // ── Inline edit plumbing ────────────────────────────────────────────────────
+  // Inline stock/price edits used to call fetchData() each time, re-downloading
+  // the entire catalogue + taxonomy for a single cell change. Now the row is
+  // patched optimistically and one coalesced refresh reconciles with the server.
+  const refreshTimer = useRef(null);
+
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimer.current) clearTimeout(refreshTimer.current);
+    refreshTimer.current = setTimeout(() => { refreshProducts(); }, 1500);
+  }, [refreshProducts]);
+
+  useEffect(() => () => { if (refreshTimer.current) clearTimeout(refreshTimer.current); }, []);
+
+  const patchVariantLocally = useCallback((productId, variantId, patch) => {
+    setProducts(prev => prev.map(p => {
+      if (p.id !== productId) return p;
+      const variants = (p.variants || []).map(v =>
+        String(v.id) === String(variantId) ? { ...v, ...patch } : v
+      );
+      const next = { ...p, variants };
+      // Keep the product-level roll-up honest while we wait for the refresh.
+      if (variants.length > 0 && patch.stock != null) {
+        next.stock_quantity = variants.reduce((sum, v) => sum + (Number(v.stock) || 0), 0);
+      }
+      return next;
+    }));
+  }, []);
 
   // Inline stock/price update handlers for VariantMatrix
   const handleInlineStockUpdate = useCallback(async (productId, variantId, newStock) => {
@@ -415,13 +606,14 @@ export default function Products() {
       });
       const json = await res.json();
       if (json.success) {
-        fetchData();
+        patchVariantLocally(productId, variantId, { stock: newStock });
+        scheduleRefresh();
         showToast('Stock updated', 'success');
       } else {
         showToast(json.message || 'Stock update failed', 'error');
       }
     } catch { showToast('Stock update failed', 'error'); }
-  }, []);
+  }, [patchVariantLocally, scheduleRefresh]);
 
   const handleInlinePriceUpdate = useCallback(async (productId, variantId, newPrice) => {
     try {
@@ -432,13 +624,14 @@ export default function Products() {
       });
       const json = await res.json();
       if (json.success) {
-        fetchData();
+        patchVariantLocally(productId, variantId, { price: newPrice });
+        scheduleRefresh();
         showToast('Price updated', 'success');
       } else {
         showToast(json.message || 'Price update failed', 'error');
       }
     } catch { showToast('Price update failed', 'error'); }
-  }, []);
+  }, [patchVariantLocally, scheduleRefresh]);
 
   return (
     <div className="p-4 sm:p-6 lg:p-8 w-full bg-t-base min-h-screen text-t-main relative">
@@ -473,7 +666,9 @@ export default function Products() {
             Products Hub
           </h1>
           <p className="text-sm text-gray-500 dark:text-gray-500 mt-1">
-            {filteredProducts.length} products · Click ▸ to expand variants
+            {serverPaginated
+              ? `${total} products · showing ${(page - 1) * PAGE_SIZE + 1}–${Math.min(page * PAGE_SIZE, total)}`
+              : `${filteredProducts.length} products`} · Click ▸ to expand variants
           </p>
         </div>
         <button
@@ -506,7 +701,7 @@ export default function Products() {
             placeholder="Search products by name or SKU..."
             aria-label="Search products"
             value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+            onChange={(e) => { setSearchQuery(e.target.value); setPage(1); }}
             className="w-full pl-11 pr-4 py-3 text-sm border border-gray-200/60 dark:border-white/10 bg-white/60 dark:bg-white/[0.03] backdrop-blur-xl rounded-2xl focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/20 outline-none transition-all duration-200 text-gray-900 dark:text-white placeholder-gray-400"
           />
         </div>
@@ -526,6 +721,35 @@ export default function Products() {
         onTag={handleTag}
         onHistory={openHistoryModal}
       />
+
+      {/* ── Pager (only when the backend actually paged) ── */}
+      {serverPaginated && total > PAGE_SIZE && (
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-3 mt-5">
+          <p className="text-xs font-semibold text-t-muted">
+            Page {page} of {Math.max(1, Math.ceil(total / PAGE_SIZE))}
+            <span className="mx-2 opacity-40">·</span>
+            {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, total)} of {total}
+          </p>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={page <= 1}
+              className="px-4 py-2 rounded-xl text-xs font-bold border border-t-border bg-t-surface text-t-main disabled:opacity-40 disabled:cursor-not-allowed hover:border-t-primary transition-colors"
+            >
+              ← Previous
+            </button>
+            <button
+              type="button"
+              onClick={() => setPage((p) => p + 1)}
+              disabled={page * PAGE_SIZE >= total}
+              className="px-4 py-2 rounded-xl text-xs font-bold border border-t-border bg-t-surface text-t-main disabled:opacity-40 disabled:cursor-not-allowed hover:border-t-primary transition-colors"
+            >
+              Next →
+            </button>
+          </div>
+        </div>
+      )}
 
       {showModal && (
         <div role="dialog" aria-modal="true" aria-label={editingId ? 'Edit product' : 'Add new product'} className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4 backdrop-blur-md">
@@ -580,7 +804,7 @@ export default function Products() {
                 <div className="space-y-4 flex flex-col">
                   <div>
                       <label className="block text-xs font-bold text-t-muted mb-1 uppercase">Main Image Upload</label>
-                      <input type="file" onChange={e => setBaseImage(e.target.files[0])} className="w-full border border-dashed border-t-border bg-t-base rounded-lg p-2 text-sm" />
+                      <input type="file" accept="image/*" onChange={(e) => handlePickImage(e, setBaseImage)} className="w-full border border-dashed border-t-border bg-t-base rounded-lg p-2 text-sm" />
                       {editingId && !baseImage && <span className="text-[10px] text-green-600 font-bold mt-1 block">System maintaining previous image.</span>}
                   </div>
                   <div className="flex-1">
@@ -679,7 +903,7 @@ export default function Products() {
                             </div>
                             <div className="col-span-2 md:col-span-5">
                                 <label className="block text-[10px] font-bold text-t-muted mb-1 uppercase">Color Image</label>
-                                <input type="file" onChange={(e) => updateExtraVariant(variant.id, 'imageFile', e.target.files[0])} className="w-full border border-dashed border-t-border bg-t-surface rounded-lg p-1.5 text-xs" />
+                                <input type="file" accept="image/*" onChange={(e) => handlePickImage(e, (file) => updateExtraVariant(variant.id, 'imageFile', file))} className="w-full border border-dashed border-t-border bg-t-surface rounded-lg p-1.5 text-xs" />
                                 {variant.existing_image_url && !variant.imageFile && <span className="text-[10px] text-green-600 font-bold mt-1 block">Image saved — replace above to change</span>}
                             </div>
                             </div>
@@ -737,7 +961,7 @@ export default function Products() {
                                 </div>
                                 <div>
                                     <label className="block text-[10px] font-bold text-t-muted mb-1 uppercase">Asset (Image)</label>
-                                    <input type="file" onChange={(e) => updateReview(review.id, 'imageFile', e.target.files[0])} className="w-full border border-dashed border-t-border bg-t-surface rounded-lg p-1.5 text-xs" />
+                                    <input type="file" accept="image/*" onChange={(e) => handlePickImage(e, (file) => updateReview(review.id, 'imageFile', file))} className="w-full border border-dashed border-t-border bg-t-surface rounded-lg p-1.5 text-xs" />
                                     {review.existing_image && !review.imageFile && <a href={review.existing_image} target="_blank" rel="noreferrer" className="text-[10px] text-pink-600 mt-1 font-bold block underline">Inspect Current Image</a>}
                                 </div>
                             </div>

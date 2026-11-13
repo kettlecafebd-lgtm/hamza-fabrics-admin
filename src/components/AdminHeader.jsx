@@ -58,7 +58,8 @@ export default function AdminHeader() {
     if (!token) return;
     setNotifLoading(true);
     try {
-      const res = await fetch(`${API}/api/notifications`, {
+      // The dropdown renders at most 30 items (see the slice below) — never pull more.
+      const res = await fetch(`${API}/api/notifications?limit=30`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       const data = await res.json();
@@ -109,22 +110,25 @@ export default function AdminHeader() {
     return () => { if (unsubNotif) unsubNotif(); };
   }, [ws, navigate]);
 
-  // Sync unread count from server periodically (fallback)
+  // Fallback poll for the unread badge — only while the WebSocket is down.
+  // 60s * every admin * every open tab was 1,440 requests/day/user for a number
+  // the socket already delivers in real time.
   useEffect(() => {
     if (!token) return;
+    if (ws?.connected) return;             // socket is authoritative — no polling
+
     const interval = setInterval(async () => {
-      if (!ws || !ws.connected) {
-        try {
-          const res = await fetch(`${API}/api/notifications/unread-count`, {
-            headers: { Authorization: `Bearer ${token}` }
-          });
-          const data = await res.json();
-          if (data.success) setUnreadCount(data.count || 0);
-        } catch (_) {}
-      }
-    }, 60000);
+      if (ws?.connected) return;
+      try {
+        const res = await fetch(`${API}/api/notifications/unread-count`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        const data = await res.json();
+        if (data.success) setUnreadCount(data.count || 0);
+      } catch (_) {}
+    }, 300000);                            // 5 minutes
     return () => clearInterval(interval);
-  }, [token, ws]);
+  }, [token, ws, ws?.connected]);
 
   const handleMarkRead = async (id) => {
     if (!token) return;
@@ -165,6 +169,8 @@ export default function AdminHeader() {
 
   const handleLogout = () => {
     localStorage.removeItem('adminToken');
+    // Drop every cached response so the next session starts cold.
+    import('../lib/dataCache').then(({ clearCache }) => clearCache()).catch(() => {});
     navigate('/login');
   };
 

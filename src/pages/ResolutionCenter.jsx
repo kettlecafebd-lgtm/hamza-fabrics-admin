@@ -4,6 +4,8 @@ import toast from 'react-hot-toast';
 import { AlertTriangle, Upload, CheckCircle, Shield } from 'lucide-react';
 import API_BASE_URL from '../config/api';
 import { ThemeContext } from '../context/ThemeContext';
+import { prepareImageForUpload, MAX_SOURCE_BYTES } from '../lib/imageOptimize';
+import { appendStorageFields } from '../lib/mediaClient';
 
 const ISSUE_TYPES = [
   { value: 'wrong-color', label: 'Received wrong color or design' },
@@ -31,7 +33,18 @@ export default function ResolutionCenter() {
   const [submitted, setSubmitted] = useState(false);
 
   const handleFileChange = (e) => {
-    const selected = Array.from(e.target.files);
+    const selected = Array.from(e.target.files).filter((file) => {
+      if (!file.type?.startsWith('image/')) {
+        toast.error(`${file.name} is not an image.`);
+        return false;
+      }
+      if (file.size > MAX_SOURCE_BYTES) {
+        toast.error(`${file.name} is ${(file.size / 1048576).toFixed(1)} MB — max ${MAX_SOURCE_BYTES / 1048576} MB.`);
+        return false;
+      }
+      return true;
+    });
+
     setFiles(prev => [...prev, ...selected]);
     selected.forEach(file => {
       const reader = new FileReader();
@@ -64,7 +77,25 @@ export default function ResolutionCenter() {
       form.append('description', description);
       form.append('customer_id', customerData.id);
       form.append('customer_email', customerData.email);
-      files.forEach(f => form.append('images', f));
+
+      // Cap at 1200 px / WebP q0.80 — these are evidence photos read on a phone,
+      // not print assets, and the customer is usually on mobile data.
+      // Cache fields are constant for the whole request, so declare them once —
+      // repeating them per file would give the backend several values to pick from.
+      appendStorageFields(form, null);
+
+      for (const f of files) {
+        let prepared = f;
+        try {
+          const result = await prepareImageForUpload(f, 'resolution');
+          prepared = result.file;
+        } catch (err) {
+          toast.error(err.message || `${f.name} is too large.`);
+          setIsSubmitting(false);
+          return;
+        }
+        form.append('images', prepared);
+      }
 
       const res = await fetch(`${API_BASE_URL}/api/resolution/create`, {
         method: 'POST',

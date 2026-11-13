@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import toast from 'react-hot-toast';
 import API_BASE_URL from '../config/api';
+import { prepareImageForUpload } from '../lib/imageOptimize';
+import { appendStorageFields, deleteMedia } from '../lib/mediaClient';
 
 function decodeToken(token) {
   try {
@@ -42,9 +44,26 @@ export default function ProfileSettings({ onClose }) {
     setSaving(true);
     try {
       let avatar_url = null;
+      let previousAvatar = null;
       if (avatarFile) {
+        // An avatar is displayed at <= 128 px — 320 px covers retina.
+        let prepared = avatarFile;
+        try {
+          const result = await prepareImageForUpload(avatarFile, 'avatar');
+          prepared = result.file;
+        } catch (err) {
+          toast.error(err.message || 'That image is too large.');
+          setSaving(false);
+          return;
+        }
+
         const formData = new FormData();
-        formData.append('file', avatarFile);
+        formData.append('file', prepared);
+        appendStorageFields(formData, prepared);
+        // Best effort: the JWT payload is all this component has.
+        previousAvatar = user?.avatar_url || user?.picture || null;
+        if (previousAvatar) formData.append('previous_image_url', previousAvatar);
+
         const uploadRes = await fetch(`${API_BASE_URL}/api/upload-image`, { method: 'POST', headers: { 'Authorization': `Bearer ${token}` }, body: formData });
         const uploadData = await uploadRes.json();
         if (uploadData.success) avatar_url = uploadData.url;
@@ -59,6 +78,10 @@ export default function ProfileSettings({ onClose }) {
       const result = await res.json();
       if (result.success) {
         toast.success('Profile updated!');
+        // Only after the DB commit succeeded: drop the avatar this one replaced.
+        if (avatar_url && previousAvatar && previousAvatar !== avatar_url) {
+          deleteMedia(previousAvatar, { apiBase: API_BASE_URL, token });
+        }
         onClose();
       } else {
         toast.error(result.message || 'Failed to update profile.');

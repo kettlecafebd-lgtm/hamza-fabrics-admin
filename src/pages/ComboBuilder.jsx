@@ -3,6 +3,7 @@ import API_BASE_URL from '../config/api';
 import { ThemeContext } from '../context/ThemeContext';
 import LiveMathWidget from '../components/ui/LiveMathWidget';
 import { getToken } from '../utils/auth';
+import { thumbUrl } from '../utils/imageUrl';
 
 /**
  * ComboBuilder — Drag-and-Drop Combo Builder Page
@@ -320,7 +321,9 @@ export default function ComboBuilder() {
                     <div className="w-10 h-10 rounded-lg bg-gray-100 dark:bg-white/5 border border-gray-200/60 dark:border-white/10 flex items-center justify-center overflow-hidden shrink-0">
                       {product.image_url ? (
                         <img
-                          src={product.image_url.startsWith('http') ? product.image_url : `${API_BASE_URL}${product.image_url}`}
+                          src={thumbUrl(product.image_url.startsWith('http') ? product.image_url : `${API_BASE_URL}${product.image_url}`, 80)}
+                          loading="lazy"
+                          decoding="async"
                           className="w-full h-full object-contain"
                           alt={product.name}
                         />
@@ -449,7 +452,9 @@ export default function ComboBuilder() {
                       <div className="w-12 h-12 rounded-xl bg-gray-100 dark:bg-white/5 border border-gray-200/60 dark:border-white/10 flex items-center justify-center overflow-hidden">
                         {item.image_url ? (
                           <img
-                            src={item.image_url.startsWith('http') ? item.image_url : `${API_BASE_URL}${item.image_url}`}
+                            src={thumbUrl(item.image_url.startsWith('http') ? item.image_url : `${API_BASE_URL}${item.image_url}`, 96)}
+                            loading="lazy"
+                            decoding="async"
                             className="w-full h-full object-contain"
                             alt={item.name}
                           />

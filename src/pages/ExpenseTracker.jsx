@@ -31,7 +31,7 @@ const ExpenseTracker = () => {
       setLoading(true);
       const headers = { 'Authorization': `Bearer ${getToken()}` };
       const [listRes, summaryRes] = await Promise.all([
-        fetch(`${API_BASE_URL}/api/expenses/list`, { headers }),
+        fetch(`${API_BASE_URL}/api/expenses/list?limit=200&offset=0`, { headers }),
         fetch(`${API_BASE_URL}/api/expenses/summary`, { headers })
       ]);
       const listData = await listRes.json();

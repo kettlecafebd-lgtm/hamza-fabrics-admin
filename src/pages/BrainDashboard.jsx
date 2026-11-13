@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useContext } from 'react';
+import React, { useState, useEffect, useContext, useRef } from 'react';
 import { ThemeContext } from '../context/ThemeContext';
 import API_BASE_URL from '../config/api';
+import { cachedFetch, invalidateCache, CACHE_TTLS } from '../lib/dataCache';
 import { Brain, MapPin, AlertTriangle, Users, TrendingUp, TrendingDown, Activity, Settings, Shield, BarChart3, Clock, RefreshCw, Play, Search, X, CheckCircle2, ChevronRight } from 'lucide-react';
 
 const segmentLabels = { vip: 'VIP', loyal: 'Loyal', regular: 'Regular', at_risk: 'At Risk', new: 'New' };
@@ -34,39 +35,104 @@ export default function BrainDashboard() {
   const token = localStorage.getItem('adminToken');
   const authHeaders = { Authorization: `Bearer ${token}` };
 
-  const fetchAll = async () => {
-    setLoading(true);
+  // ── Egress note ────────────────────────────────────────────────────────────
+  // This page used to refetch all 8 endpoints whenever ANY filter changed.
+  // Filter-independent data (summary / insights / risk-matrix / activity /
+  // settings) is now loaded once; each filtered list reloads only when its own
+  // filter changes. Mutations still refresh everything via fetchAll().
+  const fetchCore = async (force = false) => {
+    const opts = { headers: authHeaders, token, ttl: CACHE_TTLS.list, force };
     try {
-      const [sRes, iRes, zRes, aRes, cRes, rRes, lRes, setRes] = await Promise.all([
-        fetch(`${API_BASE_URL}/api/brain/summary`, { headers: authHeaders }),
-        fetch(`${API_BASE_URL}/api/brain/insights`, { headers: authHeaders }),
-        fetch(`${API_BASE_URL}/api/brain/red-zones?status=${zoneFilter}`, { headers: authHeaders }),
-        fetch(`${API_BASE_URL}/api/brain/fraud-alerts?risk=${alertFilter}`, { headers: authHeaders }),
-        fetch(`${API_BASE_URL}/api/brain/customers?segment=${segmentFilter}`, { headers: authHeaders }),
-        fetch(`${API_BASE_URL}/api/brain/risk-matrix`, { headers: authHeaders }),
-        fetch(`${API_BASE_URL}/api/brain/activity-log?limit=20`, { headers: authHeaders }),
-        fetch(`${API_BASE_URL}/api/brain/settings`, { headers: authHeaders }),
+      const [sRes, iRes, rRes, lRes, setRes] = await Promise.all([
+        cachedFetch(`${API_BASE_URL}/api/brain/summary`, opts),
+        cachedFetch(`${API_BASE_URL}/api/brain/insights`, opts),
+        cachedFetch(`${API_BASE_URL}/api/brain/risk-matrix`, opts),
+        cachedFetch(`${API_BASE_URL}/api/brain/activity-log?limit=20`, opts),
+        cachedFetch(`${API_BASE_URL}/api/brain/settings`, opts),
       ]);
       const s = await sRes.json(); if (s.success) setSummary(s);
       const i = await iRes.json(); if (i.success) setInsights(i.insights);
-      const z = await zRes.json(); if (z.success) setZones(z.zones);
-      const a = await aRes.json(); if (a.success) setAlerts(a.alerts);
-      const c = await cRes.json(); if (c.success) setCustomers(c.customers);
       const r = await rRes.json(); if (r.success) setRiskMatrix(r.matrix);
       const l = await lRes.json(); if (l.success) setActivityLog(l.logs);
       const setD = await setRes.json(); if (setD.success) setSettings(setD.settings);
     } catch (e) { console.error(e); }
-    setLoading(false);
   };
 
-  useEffect(() => { fetchAll(); }, [zoneFilter, alertFilter, segmentFilter]);
+  const fetchZones = async (force = false) => {
+    try {
+      const res = await cachedFetch(`${API_BASE_URL}/api/brain/red-zones?status=${zoneFilter}`, {
+        headers: authHeaders, token, ttl: CACHE_TTLS.list, force,
+      });
+      const z = await res.json();
+      if (z.success) setZones(z.zones);
+    } catch (e) { console.error(e); }
+  };
+
+  const fetchAlerts = async (force = false) => {
+    try {
+      const res = await cachedFetch(`${API_BASE_URL}/api/brain/fraud-alerts?risk=${alertFilter}`, {
+        headers: authHeaders, token, ttl: CACHE_TTLS.list, force,
+      });
+      const a = await res.json();
+      if (a.success) setAlerts(a.alerts);
+    } catch (e) { console.error(e); }
+  };
+
+  const fetchCustomers = async (force = false) => {
+    // Bounded: the segment list has no pager, so cap what one request can pull.
+    const params = new URLSearchParams({ segment: segmentFilter || 'all', limit: '200' });
+    try {
+      const res = await cachedFetch(`${API_BASE_URL}/api/brain/customers?${params}`, {
+        headers: authHeaders, token, ttl: CACHE_TTLS.list, force,
+      });
+      const c = await res.json();
+      if (c.success) setCustomers(c.customers);
+    } catch (e) { console.error(e); }
+  };
+
+  // A mutation must see its own effect: drop the cached pages, then reload.
+  const fetchAll = async (force = false) => {
+    if (force) invalidateCache('/api/brain');
+    await Promise.all([fetchCore(force), fetchZones(force), fetchAlerts(force), fetchCustomers(force)]);
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      await Promise.all([fetchCore(), fetchZones(), fetchAlerts(), fetchCustomers()]);
+      if (!cancelled) setLoading(false);
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Filter-scoped reloads: only the list that the filter belongs to is refetched.
+  const isFirstZoneRun = useRef(true);
+  const isFirstAlertRun = useRef(true);
+  const isFirstSegmentRun = useRef(true);
+  useEffect(() => {
+    if (isFirstZoneRun.current) { isFirstZoneRun.current = false; return; }
+    fetchZones();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [zoneFilter]);
+  useEffect(() => {
+    if (isFirstAlertRun.current) { isFirstAlertRun.current = false; return; }
+    fetchAlerts();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [alertFilter]);
+  useEffect(() => {
+    if (isFirstSegmentRun.current) { isFirstSegmentRun.current = false; return; }
+    fetchCustomers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [segmentFilter]);
 
   const runAnalysis = async () => {
     setAnalyzing(true);
     try {
       const res = await fetch(`${API_BASE_URL}/api/brain/analyze`, { method: 'POST', headers: authHeaders });
       const data = await res.json();
-      if (data.success) fetchAll();
+      if (data.success) fetchAll(true);   // POST /analyze rewrites the derived data
     } catch (e) { console.error(e); }
     setAnalyzing(false);
   };
@@ -74,7 +140,7 @@ export default function BrainDashboard() {
   const resolveAlert = async (id) => {
     try {
       await fetch(`${API_BASE_URL}/api/brain/fraud-alerts/${id}/resolve`, { method: 'PUT', headers: authHeaders });
-      fetchAll();
+      fetchAll(true);
     } catch (e) { console.error(e); }
   };
 
@@ -86,7 +152,7 @@ export default function BrainDashboard() {
         method: 'POST', headers: { ...authHeaders, 'Content-Type': 'application/json' },
         body: JSON.stringify({ ids: unresolved }),
       });
-      fetchAll();
+      fetchAll(true);
     } catch (e) { console.error(e); }
   };
 
@@ -96,7 +162,7 @@ export default function BrainDashboard() {
         method: 'PUT', headers: { ...authHeaders, 'Content-Type': 'application/json' },
         body: JSON.stringify({ key, value }),
       });
-      fetchAll();
+      fetchAll(true);
     } catch (e) { console.error(e); }
   };
 

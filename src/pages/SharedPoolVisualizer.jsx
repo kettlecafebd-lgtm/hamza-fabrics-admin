@@ -222,25 +222,35 @@ export default function SharedPoolVisualizer() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const res = await fetch(`${API_BASE_URL}/api/products`, {
+        // One request with the variants embedded. This used to be 1 + N calls
+        // (one per product), which is what made this page the worst N+1 in the app.
+        const params = new URLSearchParams({ include: 'variants', fields: 'pool', limit: '500' });
+        const res = await fetch(`${API_BASE_URL}/api/products?${params}`, {
           headers: { Authorization: `Bearer ${getToken()}` },
         });
         const json = await res.json();
         if (json.success) {
           const prods = json.data || [];
-          // Fetch variants for each product
-          const enriched = await Promise.all(
-            prods.map(async (p) => {
-              try {
-                const vRes = await fetch(`${API_BASE_URL}/api/variants/${p.id}`);
-                const vJson = await vRes.json();
-                return { ...p, variants: vJson.success ? vJson.variants || [] : [] };
-              } catch {
-                return { ...p, variants: [] };
-              }
-            })
-          );
-          setProducts(enriched);
+          const alreadyEnriched = prods.length > 0 && prods.every(p => Array.isArray(p.variants));
+
+          if (alreadyEnriched) {
+            setProducts(prods);
+          } else {
+            // Backend does not support ?include=variants yet — fall back to the
+            // per-product fetch so the visualiser keeps working.
+            const enriched = await Promise.all(
+              prods.map(async (p) => {
+                try {
+                  const vRes = await fetch(`${API_BASE_URL}/api/variants/${p.id}`);
+                  const vJson = await vRes.json();
+                  return { ...p, variants: vJson.success ? vJson.variants || [] : [] };
+                } catch {
+                  return { ...p, variants: [] };
+                }
+              })
+            );
+            setProducts(enriched);
+          }
         }
       } catch (err) {
         console.error('Fetch error:', err);

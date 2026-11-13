@@ -45,8 +45,16 @@ export const CustomerAIProfileProvider = ({ children }) => {
       });
       const analyticsData = await analyticsRes.json();
 
-      // Fetch order history to infer preferences
-      const ordersRes = await fetch(`${API_BASE_URL}/api/customers/orders`, {
+      // Fetch THIS customer's order history to infer preferences.
+      // Previously this hit /api/customers/orders with no filter — every order in
+      // the system, for one shopper's colour affinity (and an IDOR: `phone` came
+      // from the caller). Scoped + capped now.
+      const orderParams = new URLSearchParams({
+        phone,
+        limit: '50',
+        fields: 'affinity',   // name/sku/category only — no billing, no metrics, no blobs
+      });
+      const ordersRes = await fetch(`${API_BASE_URL}/api/customers/orders?${orderParams}`, {
         headers: { 'Authorization': `Bearer ${localStorage.getItem('customerToken') || ''}` },
         credentials: 'include',
       });
@@ -102,7 +110,8 @@ export const CustomerAIProfileProvider = ({ children }) => {
         affinityTags,
         preferredColors: preferredColors.slice(0, 5),
         preferredCategories: preferredCategories.slice(0, 3),
-        totalOrders: ordersData.data?.length || 0,
+        // Prefer the server's true count — the history above is capped at 50.
+        totalOrders: analyticsData.data?.total_orders ?? ordersData.total ?? ordersData.data?.length ?? 0,
         successRate: analyticsData.data?.success_rate || 100,
         isLoading: false,
       });

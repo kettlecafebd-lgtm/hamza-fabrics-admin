@@ -36,7 +36,7 @@ export default function CRMLeads() {
       // API Call: Analytics & Leads (একসাথে)
       const [summaryRes, leadsRes] = await Promise.all([
         fetch(`${API_BASE_URL}/api/marketing/analytics-summary`, { headers }),
-        fetch(`${API_BASE_URL}/api/marketing/abandoned-carts`, { headers })
+        fetch(`${API_BASE_URL}/api/marketing/abandoned-carts?limit=100`, { headers })
       ]);
 
       const summaryData = await summaryRes.json();

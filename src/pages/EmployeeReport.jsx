@@ -32,7 +32,7 @@ export default function EmployeeReport() {
   const fetchEmployees = async () => {
     try {
       const [empRes, analyticsRes] = await Promise.all([
-        fetch(`${API_BASE_URL}/api/auth/employees`, {
+        fetch(`${API_BASE_URL}/api/auth/employees?limit=100`, {
           headers: { 'Authorization': `Bearer ${localStorage.getItem('adminToken')}` }
         }),
         fetch(`${API_BASE_URL}/api/analytics?filter=${dateFilter === 'Today' ? 'today' : '30days'}`, {

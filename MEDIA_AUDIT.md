@@ -11,11 +11,11 @@
 | Question | Before | Now (this branch) |
 |---|---|---|
 | Are images compressed before upload? | **No.** Every path sent the camera original. A 12 MP phone photo is 3–6 MB; a 48 MP one is 10–20 MB. | Yes — client-side resize → WebP on all 6 image entry points, ~90–96 % smaller. |
-| Are old files deleted on update/delete? | **No.** Zero delete calls existed anywhere. 100 % of replaced/deleted images leaked, forever. | Client sweep after a confirmed commit, guarded by a reference check. A server-side GC is still required (§5.4). |
-| Is CDN caching usable? | **No.** `cacheControl` was never set, so objects went up with the bucket default and every cache was revalidated. | Uploads are content-addressed (`name-<hash>.webp`) and the backend is told to store `immutable` — stale bytes become impossible (§4.3, §5.1). |
+| Are old files deleted on update/delete? | **No.** Zero delete calls existed anywhere. 100 % of replaced/deleted images leaked, forever. | Client sweep after a confirmed commit, plus the matching server route (`POST /api/media/delete` in `hamza-backend`) which re-checks every reference and fails closed. A scheduled GC is still required (§5.4). |
+| Is CDN caching usable? | **No.** `cacheControl` was never set, so objects went up with the bucket default and every cache was revalidated. | Uploads are content-addressed (`name-<hash>.webp`) and the upload handler is told to store a one-year `max-age`. Supabase only stores seconds (`Cache-Control: max-age=<n>`); `immutable` needs R2 or a CDN rule (§4.3, §5.1). |
 | Are thumbnails loading full-size originals? | **Yes.** 40–48 px thumbs pointed at multi-MB originals. | Fixed: `thumbUrl` + `lazy` + `srcSet` (task 1 + this task). |
 
-**The one thing that matters:** the browser cannot fix `Cache-Control` and cannot reliably see orphaned objects. Roughly half of this problem lives in the backend, which is not in this repository — §5 is the code for that half.
+**The one thing that matters:** the browser cannot fix `Cache-Control` and cannot reliably see orphaned objects. Roughly half of this problem lives in the backend. The chat/media backend (`hamza-backend/`) now ships the delete + cache-control routes (§5.3); the uploader itself is still in the main API, which is not in this repository — §5 is the checklist for that half.
 
 ---
 
@@ -232,7 +232,7 @@ The one intentional behaviour change: a source larger than **25 MB** is now reje
 
 ## 5. Backend work still required
 
-The frontend can prepare bytes and ask for cleanup. It cannot store them correctly. These four items are the other half.
+The frontend can prepare bytes and ask for cleanup. It cannot store them correctly. §5.1–5.2 are still the other half (the uploader lives outside this repo); §5.3 is now implemented in `hamza-backend/`.
 
 ### 5.1 Store images with a real Cache-Control (pick one)
 
@@ -284,49 +284,74 @@ Notes:
 
 The client sends `previous_image_url` as a convenience. If your database can carry it, a `previous_image_url` column (or an `old_url` in an upload log) makes cleanup auditable after the fact and lets a canonical job do the deleting server-side — the client call becomes a hint, not the mechanism.
 
-### 5.3 `/api/media/delete` — the endpoint the client already calls
+### 5.3 `/api/media/delete` — now implemented (`hamza-backend`)
 
-Contract the frontend expects: `POST`, Bearer auth, body `{ urls: string[] }`, response `{ deleted: string[], skipped: string[] }`, idempotent, 404-tolerant on the client.
+The frontend has called this contract since the first audit; until now no backend
+in this workspace had the route, so every sweep 404'd into a console warning.
+It is implemented in **`hamza-backend/src/routes/media.js`** (mounted at
+`/api/media` behind `requireAdmin`) with the storage adapter in
+**`src/services/mediaStorage.js`**:
 
-```js
-app.post('/api/media/delete', requireAdmin, async (req, res) => {
-  const urls = Array.isArray(req.body?.urls) ? req.body.urls : [];
-  if (!urls.length) return res.json({ deleted: [], skipped: [] });
+| Method + path | Body | Response |
+|---|---|---|
+| `POST /api/media/delete` | `{ urls: string[] }` | `{ deleted, skipped, reasons }` |
+| `POST /api/media/cache-control` | `{ urls: string[] }` | `{ updated, skipped, reasons, cacheControl }` |
 
-  const deleted = [];
-  const skipped = [];
+`deleteMedia()` in `src/lib/mediaClient.js` targets the same relative path
+(`VITE_MEDIA_DELETE_PATH` overrides it), so nothing in the call sites changed.
 
-  for (const url of urls.slice(0, 50)) {          // bound the work per request
-    const key = storageKeyFromUrl(url);            // bucket/path, never trust the host
-    if (!key) { skipped.push(url); continue; }
+A refusal is not an error: it arrives as `200 {skipped:[…], reasons:{url: why}}`
+with `why` ∈ `referenced`, `disabled`, `legacy-disk`, `foreign-host`,
+`references-unavailable`, `not-an-object-url`, `storage-error` (`too-large` on
+the cache-control route).
 
-    // THE IMPORTANT PART: is any row still pointing at it?
-    const { count } = await db.from('media_references')   // or UNION over the real columns
-      .select('*', { count: 'exact', head: true })
-      .eq('storage_key', key);
-    if (count > 0) { skipped.push(url); continue; }
+**One deployment prerequisite:** the route sits behind `requireAdmin`, which
+verifies a **Supabase-issued JWT** (`client.auth.getUser`). If your main API
+issues its own admin tokens, every sweep will answer `401` (harmlessly — the
+client tolerates it) until the two auth schemes agree. Either accept that token
+here, move the route into the main API, or mint Supabase JWTs at login.
 
-    const { error } = await supabase.storage.from(bucketOf(key)).remove([pathOf(key)]);
-    if (error && !/not found/i.test(error.message)) { skipped.push(url); continue; }
-    deleted.push(url);
-  }
+Every safety rule is code, not convention:
 
-  res.json({ deleted, skipped });
-});
-```
+1. **Our host only.** The URL host must equal `SUPABASE_URL`; a crafted URL
+   cannot aim the service-role key at another project.
+2. **Allow-listed buckets.** `MEDIA_DELETE_BUCKETS` (default `media,products`).
+3. **Object URLs only.** `/uploads/…` (legacy disk, proxied by `nginx.conf`),
+   `data:`/`blob:`, bare keys and relative paths are skipped before any network call.
+4. **Reference check, fail closed.** One batched query against
+   `media_references` proves no row points at the key. Missing view or failed
+   query ⇒ *skip everything*, never delete.
+5. **Opt-in.** `MEDIA_DELETE_ENABLED=false` by default; turn it on only after
+   migration 003 has been verified.
+6. **Idempotent.** A missing object is a success; a 50-URL cap bounds the work.
 
-If you do not have a `media_references` table, the check must span the real columns — `products.image_url`, variant image columns, `product_reviews.image_url`, `system_settings` JSON (hero/footer/logo), `profiles.avatar_url`. A single `UNION ALL` view over those is the cheapest way to keep it honest:
+The reference view is created by **`hamza-backend/migrations/003_media_references.sql`**
+(guarded by table *and* column checks, so it cannot fail on a schema that differs
+from this audit) and it normalises URLs with `media_storage_key()` — the SQL twin
+of `toStorageKey()` in the frontend. It has been executed end-to-end against
+PostgreSQL 16 (PGlite), including a re-run and a schema with none of the tables.
 
-```sql
-CREATE OR REPLACE VIEW media_references AS
-  SELECT image_url AS url FROM products WHERE image_url IS NOT NULL
-  UNION ALL SELECT image_url FROM product_variants WHERE image_url IS NOT NULL
-  UNION ALL SELECT image_url FROM product_reviews WHERE image_url IS NOT NULL
-  UNION ALL SELECT avatar_url FROM profiles WHERE avatar_url IS NOT NULL;
-  -- add the settings JSON if banners live in a jsonb column
-```
+> **Cover everything.** The view only knows the columns it is told about. Product
+> review photos and hero/footer banners may live inside JSON (`product.reviews`,
+> `settings.hero_images`). Anything missing from the view is never deleted — safe,
+> but still a leak. Extend `media_references_sql()` and re-run the migration.
+> `scripts/db-diagnostics.sql` (§18) lists buckets and object counts, which is the
+> fastest way to see what is actually stored.
 
-> Verify the column names against your schema — this repository contains no DDL. `scripts/db-diagnostics.sql` (§18) lists the buckets and their object counts, which is the fastest way to see what is actually stored.
+### 5.3a `cacheControl` — what the backend can and cannot do
+
+- **Upload path:** the client already posts `cache_control` (seconds),
+  `cache_control_header`, `content_type` and `file_name` via
+  `appendStorageFields()`. The upload handler (main API, not in this repo) must
+  actually read them and pass `cacheControl` to the storage write.
+- **Supabase stores seconds, not a full header.** `storage.from(b).upload(…, {
+  cacheControl: '31536000' })` yields `Cache-Control: max-age=31536000`. The
+  `immutable` token cannot be expressed through Supabase's field — get it from
+  R2 (`CacheControl` put option) or a CDN rule in front of the bucket.
+- **Existing objects:** `POST /api/media/cache-control` re-downloads each object
+  (bounded: 10 URLs, 8 MB each) and re-uploads it with the configured seconds,
+  because Supabase has no metadata-only update. That is a one-time backfill, not
+  a request-path operation.
 
 ### 5.4 The reconciliation GC (the part that closes the leak)
 
@@ -361,9 +386,13 @@ The `srcSet`/`thumbUrl` helpers only pay off when transformations are on:
 ## 6. Verification
 
 ```bash
-node scripts/media-selftest.mjs     # 37/37 — scaling maths, passthrough rules,
+node scripts/media-selftest.mjs     # 41/41 — scaling maths, passthrough rules,
                                     # never-grow rule, URL normalisation,
-                                    # shared-asset guard, cleanup never throws
+                                    # shared-asset guard, deleteMedia contract,
+                                    # cleanup never throws
+cd hamza-backend && npm test        # 34/34 — includes the life-cycle routes:
+                                    # reference guard, fail-closed, opt-in,
+                                    # foreign-host/legacy-disk skips, bounds
 npm run build                       # ✓ 1.74 s
 ```
 
@@ -371,11 +400,11 @@ The self-test stubs the canvas API, so it proves logic, not encoder quality. Man
 
 1. Upload a 12 MP phone photo as a product image → network tab shows ~150–250 KB `image/webp`, not 5 MB.
 2. Upload the same photo twice → identical filename hash (no duplicate object).
-3. Edit a product, swap the photo, save → old object removed, *if* the backend implements §5.3 (otherwise a console warning and no harm).
+3. Edit a product, swap the photo, save → old object removed *once migration 003 is applied and `MEDIA_DELETE_ENABLED=true`*; until then it is `skipped: ['disabled']` (no error, no harm).
 4. Two products sharing one image; delete one → the other still renders.
 5. Upload a portrait photo → not sideways (EXIF).
 6. Upload a GIF → still animated.
-7. `curl -I <stored object>` → `cache-control: public, max-age=31536000, immutable` (after §5.1).
+7. `curl -I <stored object>` → `cache-control: max-age=31536000` on Supabase (`public, …, immutable` only on R2/CDN; see §5.3a).
 
 ---
 

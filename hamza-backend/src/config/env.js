@@ -26,7 +26,29 @@ const DEFAULTS = {
    * Must stay false: this is the exact behaviour we are removing.
    */
   ENABLE_LEGACY_BLOB_WRITES: false,
+
+  // ---- Product / hero media life-cycle (POST /api/media/*) ----
+  /**
+   * Deletion is opt-in: enable it only after migration 003's
+   * `media_references` view exists and has been verified. While false, every
+   * URL is answered with `skipped: ['disabled']` and nothing is removed.
+   */
+  MEDIA_DELETE_ENABLED: false,
+  /** Buckets the delete route may touch (comma-separated). */
+  MEDIA_DELETE_BUCKETS: 'media,products',
+  /** Bound on work per request; the browser sweeps at most this many at once. */
+  MEDIA_DELETE_MAX_URLS: 50,
+  /** Cache-control backfill is heavier (bytes round-trip), so keep it small. */
+  MEDIA_CACHE_CONTROL_MAX_URLS: 10,
+  MEDIA_CACHE_CONTROL_MAX_BYTES: 8 * 1024 * 1024,
+  /** Seconds Supabase stores for uploads; a year only because keys are content-addressed. */
+  MEDIA_UPLOAD_CACHE_CONTROL_SECONDS: 31_536_000,
+  /** View/table the delete route consults before removing an object. */
+  MEDIA_REFERENCES_VIEW: 'media_references',
 };
+
+/** Values that must be booleans, not the raw env string. */
+const BOOLEAN_KEYS = ['ENABLE_LEGACY_BLOB_WRITES', 'MEDIA_DELETE_ENABLED'];
 
 const REQUIRED = ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY'];
 
@@ -67,7 +89,9 @@ export function loadEnv(source = process.env) {
     }
   }
 
-  env.ENABLE_LEGACY_BLOB_WRITES = readBool(source.ENABLE_LEGACY_BLOB_WRITES, DEFAULTS.ENABLE_LEGACY_BLOB_WRITES);
+  for (const key of BOOLEAN_KEYS) {
+    env[key] = readBool(source[key], DEFAULTS[key]);
+  }
   env.META_GRAPH_VERSION = String(env.META_GRAPH_VERSION).replace(/^\/+/, '');
 
   const missing = REQUIRED.filter((key) => !env[key]);

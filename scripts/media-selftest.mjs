@@ -182,6 +182,26 @@ globalThis.fetch = async () => { throw new Error('network down'); };
 cleanupThrew = null; try { await deleteMedia(['https://s/x/a.webp']); } catch (e) { cleanupThrew = e; }
 check('network failure is swallowed', cleanupThrew === null);
 
+// The hamza-backend route answers 200 with per-URL reasons; a refusal is not an error.
+const backendUrl = 'https://s/x/kept.webp';
+globalThis.fetch = async () => ({
+  ok: true,
+  status: 200,
+  json: async () => ({
+    success: true,
+    deleted: [],
+    skipped: [backendUrl],
+    reasons: { [backendUrl]: 'referenced' },
+  }),
+});
+const swept = await deleteMedia([backendUrl]);
+check('accepts the backend {deleted,skipped} shape', swept.deleted.length === 0 && swept.skipped[0] === backendUrl);
+check('surfaces per-URL reasons for debugging', swept.reasons?.[backendUrl] === 'referenced');
+
+globalThis.fetch = async () => ({ ok: false, status: 401, json: async () => ({}) });
+cleanupThrew = null; try { await deleteMedia(['https://s/x/a.webp']); } catch (e) { cleanupThrew = e; }
+check('401 (admin token not accepted) is tolerated', cleanupThrew === null);
+
 calls = []; globalThis.fetch = async (u, o) => { calls.push(u); return { ok: true, status: 200 }; };
 let sentBody = null;
 globalThis.fetch = async (u, o) => { calls.push(u); sentBody = JSON.parse(o.body); return { ok: true, status: 200 }; };

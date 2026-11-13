@@ -10,6 +10,7 @@ import {
 import { ThemeContext } from '../../context/ThemeContext'; 
 import API_BASE_URL from '../../config/api';
 import { thumbUrl, srcSet, IMAGE_PLACEHOLDER } from '../../utils/imageUrl';
+import { checkCheckout } from '../../utils/brain';
 import toast from 'react-hot-toast';
 
 export default function OrderTable({
@@ -17,13 +18,12 @@ export default function OrderTable({
   handleSendToCourier, selectedCouriers, setSelectedCouriers, couriers,
   openActionId, setOpenActionId, handlePrintSingle, handlePrintSingleSticker, handleStatusChange, setEnlargedImage,
   openEditModal, handleAddNote, handleCreateTask, handleJpgExport,
-  visibleColumns
+  visibleColumns, brainFlags, setBrainFlags
 }) {
   const { adminTheme, isAdminDark } = useContext(ThemeContext); 
   const [activeTooltip, setActiveTooltip] = useState(null);
   const [fetchingPhone, setFetchingPhone] = useState(null);
   const [liveMetrics, setLiveMetrics] = useState({});
-  const [brainFlags, setBrainFlags] = useState({});
 
   const timeAgo = (date) => {
     if (!date) return 'Unknown';
@@ -56,26 +56,19 @@ export default function OrderTable({
     return '#'; 
   };
 
-  const fetchLiveFraudData = async (orderId, phone, deliveryArea) => {
+  const askBrain = (order) => checkCheckout(order).then(flag => setBrainFlags(prev => ({ ...prev, [order.id]: flag })));
+
+  const fetchLiveFraudData = async (order) => {
+    const orderId = order.id;
+    const phone = order.customer?.phone;
     if(!phone) return toast.error("No phone number found!");
     setFetchingPhone(orderId);
+    // The Brain is asked on its own, so a Brain problem cannot hide the courier rating (and the other way round).
+    const brainAsked = askBrain(order);
     try {
       const token = localStorage.getItem('adminToken');
-      const [fraudRes, brainRes] = await Promise.all([
-        fetch(`${API_BASE_URL}/api/courier/fraud-check/${phone}`, { headers: { 'Authorization': `Bearer ${token}` } }),
-        fetch(`${API_BASE_URL}/api/brain/check-checkout`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ phone: `+88${phone.replace(/[^0-9]/g, '')}`, delivery_area: deliveryArea || '' })
-        })
-      ]);
+      const fraudRes = await fetch(`${API_BASE_URL}/api/courier/fraud-check/${phone}`, { headers: { 'Authorization': `Bearer ${token}` } });
       const result = await fraudRes.json();
-      const brainData = await brainRes.json();
-      
-      if(brainData.success && !brainData.cod_allowed) {
-        setBrainFlags(prev => ({ ...prev, [orderId]: brainData }));
-      } else {
-        setBrainFlags(prev => ({ ...prev, [orderId]: null }));
-      }
 
       if(result.success && result.data) {
          const summary = result.data.summary;
@@ -92,7 +85,7 @@ export default function OrderTable({
          setLiveMetrics(prev => ({ ...prev, [orderId]: { total_orders: 0, success_rate: 0 } }));
          toast.error("No data found in couriers!"); 
       }
-    } catch(err) { toast.error("Failed to fetch live rating."); } finally { setFetchingPhone(null); }
+    } catch(err) { toast.error("Failed to fetch live rating."); } finally { await brainAsked; setFetchingPhone(null); }
   };
 
   return (
@@ -178,13 +171,18 @@ export default function OrderTable({
                             {sRate}%
                           </span>
                         ) : (
-                          <button onClick={() => fetchLiveFraudData(order.id, order.customer?.phone, order.delivery_area)} disabled={fetchingPhone === order.id} className="text-[10px] bg-t-primary/10 text-t-primary px-1.5 py-0.5 rounded font-bold disabled:opacity-50 transition-colors">
+                          <button onClick={() => fetchLiveFraudData(order)} disabled={fetchingPhone === order.id} className="text-[10px] bg-t-primary/10 text-t-primary px-1.5 py-0.5 rounded font-bold disabled:opacity-50 transition-colors">
                             {fetchingPhone === order.id ? '...' : 'Check'}
                           </button>
                         )}
-                        {brainFlags[order.id] && (
+                        {/* Red: the Brain blocks cash on delivery. Grey "?": the Brain could not answer, which is not the same as "fine". */}
+                        {brainFlags[order.id] && (brainFlags[order.id].failed ? (
+                          <button onClick={async () => { setFetchingPhone(order.id); await askBrain(order); setFetchingPhone(null); }} disabled={fetchingPhone === order.id} title={`${brainFlags[order.id].reason}\nClick to ask again.`} className="text-[9px] font-bold px-1 py-0.5 rounded bg-gray-200 text-gray-600 ml-1 disabled:opacity-50">
+                            {fetchingPhone === order.id ? '...' : 'BRAIN ?'}
+                          </button>
+                        ) : (
                           <span title={brainFlags[order.id].reason} className="text-[9px] font-bold px-1 py-0.5 rounded bg-red-100 text-red-600 ml-1 cursor-help">BRAIN</span>
-                        )}
+                        ))}
                         
                         <a href={`tel:${order.customer?.phone || ''}`} className="text-blue-500 hover:text-blue-400 ml-1 transition-colors"><PhoneCall size={12} /></a>
                         <a href={`https://wa.me/${(order.customer?.phone || '').replace(/[^0-9]/g, '')}`} target="_blank" rel="noopener noreferrer" className="text-green-500 hover:text-green-600 transition-colors"><MessageCircle size={12} /></a>
@@ -431,4 +429,6 @@ OrderTable.propTypes = {
   handleCreateTask: PropTypes.func.isRequired,
   handleJpgExport: PropTypes.func.isRequired,
   visibleColumns: PropTypes.object.isRequired,
+  brainFlags: PropTypes.object.isRequired,
+  setBrainFlags: PropTypes.func.isRequired,
 };

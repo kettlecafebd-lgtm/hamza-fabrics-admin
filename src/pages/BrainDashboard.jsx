@@ -1,30 +1,37 @@
-import React, { useState, useEffect, useContext, useRef } from 'react';
-import { ThemeContext } from '../context/ThemeContext';
-import API_BASE_URL from '../config/api';
-import { cachedFetch, invalidateCache, CACHE_TTLS } from '../lib/dataCache';
-import { Brain, MapPin, AlertTriangle, Users, TrendingUp, TrendingDown, Activity, Settings, Shield, BarChart3, Clock, RefreshCw, Play, Search, X, CheckCircle2, ChevronRight } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import toast from 'react-hot-toast';
+import apiClient from '../utils/apiClient';
+import { toBrainPhone } from '../utils/phone';
+import { Brain, MapPin, AlertTriangle, Users, TrendingUp, TrendingDown, Activity, Settings, Shield, BarChart3, Clock, RefreshCw, Play, Search, X, CheckCircle2 } from 'lucide-react';
 
 const segmentLabels = { vip: 'VIP', loyal: 'Loyal', regular: 'Regular', at_risk: 'At Risk', new: 'New' };
 const segmentColors = { vip: 'text-yellow-500', loyal: 'text-green-500', regular: 'text-blue-500', at_risk: 'text-orange-500', new: 'text-gray-500' };
 
-export default function BrainDashboard() {
-  const { adminTheme, isAdminDark } = useContext(ThemeContext);
-  const bgCard = isAdminDark ? 'bg-gray-800' : 'bg-white';
-  const textColor = isAdminDark ? 'text-gray-100' : 'text-gray-800';
-  const mutedText = isAdminDark ? 'text-gray-400' : 'text-gray-500';
-  const borderColor = isAdminDark ? 'border-gray-700' : 'border-gray-200';
-  const inputBg = isAdminDark ? 'bg-gray-700' : 'bg-gray-50';
+/**
+ * Reads one Brain address. It reads again when the address changes (a filter
+ * click) or when `refresh` goes up (after something changed on the server).
+ * A late answer for an old address is dropped, so a list never shows the rows
+ * of another filter. Returns {} while waiting, then { data } or { error }.
+ */
+function useBrain(path, refresh) {
+  const [state, setState] = useState({});
+  useEffect(() => {
+    let ignore = false;
+    apiClient(path)
+      .then(data => { if (!ignore) setState({ data }); })
+      .catch(error => {
+        if (ignore) return;
+        setState({ error });
+        toast.error(error.message, { id: 'brain-load' }); // one message, even when all eight reads fail
+      });
+    return () => { ignore = true; };
+  }, [path, refresh]);
+  return state;
+}
 
+export default function BrainDashboard() {
   const [tab, setTab] = useState('overview');
-  const [summary, setSummary] = useState(null);
-  const [insights, setInsights] = useState(null);
-  const [zones, setZones] = useState([]);
-  const [alerts, setAlerts] = useState([]);
-  const [customers, setCustomers] = useState([]);
-  const [riskMatrix, setRiskMatrix] = useState([]);
-  const [activityLog, setActivityLog] = useState([]);
-  const [settings, setSettings] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [refresh, setRefresh] = useState(0);
   const [analyzing, setAnalyzing] = useState(false);
   const [zoneFilter, setZoneFilter] = useState('');
   const [alertFilter, setAlertFilter] = useState('');
@@ -32,160 +39,80 @@ export default function BrainDashboard() {
   const [searchPhone, setSearchPhone] = useState('');
   const [customerDetail, setCustomerDetail] = useState(null);
 
-  const token = localStorage.getItem('adminToken');
-  const authHeaders = { Authorization: `Bearer ${token}` };
+  // One read per job: a filter click changes one address, so it reads one list again, not all eight.
+  const brain = {
+    summary: useBrain('/api/brain/summary', refresh),
+    insights: useBrain('/api/brain/insights', refresh),
+    zones: useBrain(`/api/brain/red-zones?status=${zoneFilter}`, refresh),
+    alerts: useBrain(`/api/brain/fraud-alerts?risk=${alertFilter}`, refresh),
+    customers: useBrain(`/api/brain/customers?segment=${segmentFilter}`, refresh),
+    matrix: useBrain('/api/brain/risk-matrix', refresh),
+    logs: useBrain('/api/brain/activity-log?limit=20', refresh),
+    settings: useBrain('/api/brain/settings', refresh),
+  };
+  const alerts = brain.alerts.data?.alerts ?? [];
+  const loading = Object.values(brain).some(read => !read.data && !read.error);
 
-  // ── Egress note ────────────────────────────────────────────────────────────
-  // This page used to refetch all 8 endpoints whenever ANY filter changed.
-  // Filter-independent data (summary / insights / risk-matrix / activity /
-  // settings) is now loaded once; each filtered list reloads only when its own
-  // filter changes. Mutations still refresh everything via fetchAll().
-  const fetchCore = async (force = false) => {
-    const opts = { headers: authHeaders, token, ttl: CACHE_TTLS.list, force };
+  const reload = () => setRefresh(n => n + 1);
+
+  // Every change works the same way: ask the server, show its reason if it says no, then read the page again.
+  // Resolves to true when the server did it.
+  const change = async (path, options) => {
     try {
-      const [sRes, iRes, rRes, lRes, setRes] = await Promise.all([
-        cachedFetch(`${API_BASE_URL}/api/brain/summary`, opts),
-        cachedFetch(`${API_BASE_URL}/api/brain/insights`, opts),
-        cachedFetch(`${API_BASE_URL}/api/brain/risk-matrix`, opts),
-        cachedFetch(`${API_BASE_URL}/api/brain/activity-log?limit=20`, opts),
-        cachedFetch(`${API_BASE_URL}/api/brain/settings`, opts),
-      ]);
-      const s = await sRes.json(); if (s.success) setSummary(s);
-      const i = await iRes.json(); if (i.success) setInsights(i.insights);
-      const r = await rRes.json(); if (r.success) setRiskMatrix(r.matrix);
-      const l = await lRes.json(); if (l.success) setActivityLog(l.logs);
-      const setD = await setRes.json(); if (setD.success) setSettings(setD.settings);
-    } catch (e) { console.error(e); }
+      await apiClient(path, options);
+      reload();
+      return true;
+    } catch (error) {
+      toast.error(error.message);
+      return false;
+    }
   };
-
-  const fetchZones = async (force = false) => {
-    try {
-      const res = await cachedFetch(`${API_BASE_URL}/api/brain/red-zones?status=${zoneFilter}`, {
-        headers: authHeaders, token, ttl: CACHE_TTLS.list, force,
-      });
-      const z = await res.json();
-      if (z.success) setZones(z.zones);
-    } catch (e) { console.error(e); }
-  };
-
-  const fetchAlerts = async (force = false) => {
-    try {
-      const res = await cachedFetch(`${API_BASE_URL}/api/brain/fraud-alerts?risk=${alertFilter}`, {
-        headers: authHeaders, token, ttl: CACHE_TTLS.list, force,
-      });
-      const a = await res.json();
-      if (a.success) setAlerts(a.alerts);
-    } catch (e) { console.error(e); }
-  };
-
-  const fetchCustomers = async (force = false) => {
-    // Bounded: the segment list has no pager, so cap what one request can pull.
-    const params = new URLSearchParams({ segment: segmentFilter || 'all', limit: '200' });
-    try {
-      const res = await cachedFetch(`${API_BASE_URL}/api/brain/customers?${params}`, {
-        headers: authHeaders, token, ttl: CACHE_TTLS.list, force,
-      });
-      const c = await res.json();
-      if (c.success) setCustomers(c.customers);
-    } catch (e) { console.error(e); }
-  };
-
-  // A mutation must see its own effect: drop the cached pages, then reload.
-  const fetchAll = async (force = false) => {
-    if (force) invalidateCache('/api/brain');
-    await Promise.all([fetchCore(force), fetchZones(force), fetchAlerts(force), fetchCustomers(force)]);
-  };
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setLoading(true);
-      await Promise.all([fetchCore(), fetchZones(), fetchAlerts(), fetchCustomers()]);
-      if (!cancelled) setLoading(false);
-    })();
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Filter-scoped reloads: only the list that the filter belongs to is refetched.
-  const isFirstZoneRun = useRef(true);
-  const isFirstAlertRun = useRef(true);
-  const isFirstSegmentRun = useRef(true);
-  useEffect(() => {
-    if (isFirstZoneRun.current) { isFirstZoneRun.current = false; return; }
-    fetchZones();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [zoneFilter]);
-  useEffect(() => {
-    if (isFirstAlertRun.current) { isFirstAlertRun.current = false; return; }
-    fetchAlerts();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [alertFilter]);
-  useEffect(() => {
-    if (isFirstSegmentRun.current) { isFirstSegmentRun.current = false; return; }
-    fetchCustomers();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [segmentFilter]);
 
   const runAnalysis = async () => {
     setAnalyzing(true);
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/brain/analyze`, { method: 'POST', headers: authHeaders });
-      const data = await res.json();
-      if (data.success) fetchAll(true);   // POST /analyze rewrites the derived data
-    } catch (e) { console.error(e); }
+    await change('/api/brain/analyze', { method: 'POST' });
     setAnalyzing(false);
   };
 
-  const resolveAlert = async (id) => {
-    try {
-      await fetch(`${API_BASE_URL}/api/brain/fraud-alerts/${id}/resolve`, { method: 'PUT', headers: authHeaders });
-      fetchAll(true);
-    } catch (e) { console.error(e); }
+  const resolveAlert = (id) => change(`/api/brain/fraud-alerts/${id}/resolve`, { method: 'PUT' });
+
+  const bulkResolveAlerts = () => {
+    const ids = alerts.filter(a => !a.resolved_at).map(a => a.id);
+    if (ids.length === 0) return;
+    if (!window.confirm(`Are you sure you want to resolve all ${ids.length} alerts in this list?`)) return;
+    return change('/api/brain/fraud-alerts/bulk-resolve', { method: 'POST', body: { ids } });
   };
 
-  const bulkResolveAlerts = async () => {
-    const unresolved = alerts.filter(a => !a.resolved_at).map(a => a.id);
-    if (unresolved.length === 0) return;
-    try {
-      await fetch(`${API_BASE_URL}/api/brain/fraud-alerts/bulk-resolve`, {
-        method: 'POST', headers: { ...authHeaders, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids: unresolved }),
-      });
-      fetchAll(true);
-    } catch (e) { console.error(e); }
-  };
-
-  const updateSetting = async (key, value) => {
-    try {
-      await fetch(`${API_BASE_URL}/api/brain/settings`, {
-        method: 'PUT', headers: { ...authHeaders, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key, value }),
-      });
-      fetchAll(true);
-    } catch (e) { console.error(e); }
-  };
+  const updateSetting = (key, value) => change('/api/brain/settings', { method: 'PUT', body: { key, value } });
 
   const searchCustomer = async () => {
-    if (!searchPhone.trim()) return;
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/brain/customers/${encodeURIComponent(searchPhone)}`, { headers: authHeaders });
-      const data = await res.json();
-      if (data.success) setCustomerDetail(data);
-    } catch (e) { console.error(e); }
+    const typed = searchPhone.trim();
+    if (!typed) return;
+    // One person can be saved as "017…" or as "+88017…": try what was typed, then the other spellings.
+    const withCode = toBrainPhone(typed);
+    let lastError;
+    for (const phone of new Set([typed, withCode, withCode.slice(3)].filter(Boolean))) {
+      try {
+        return setCustomerDetail(await apiClient(`/api/brain/customers/${encodeURIComponent(phone)}`));
+      } catch (error) { lastError = error; }
+    }
+    setCustomerDetail(null); // never leave the card of the customer searched before
+    toast.error(lastError.data?.message || ([200, 404].includes(lastError.status) ? 'Customer not found' : lastError.message));
   };
 
   const tabs = [
-    { key: 'overview', label: 'Overview', icon: <Brain className="w-4 h-4" /> },
-    { key: 'red_zones', label: 'Red Zones', icon: <MapPin className="w-4 h-4" /> },
-    { key: 'fraud', label: 'Fraud Alerts', icon: <AlertTriangle className="w-4 h-4" /> },
-    { key: 'customers', label: 'Customers', icon: <Users className="w-4 h-4" /> },
-    { key: 'risk_matrix', label: 'Risk Matrix', icon: <BarChart3 className="w-4 h-4" /> },
-    { key: 'activity', label: 'Activity', icon: <Clock className="w-4 h-4" /> },
-    { key: 'settings', label: 'Settings', icon: <Settings className="w-4 h-4" /> },
+    { key: 'overview', label: 'Overview', icon: <Brain className="w-4 h-4" />, needs: ['summary', 'insights', 'matrix'] },
+    { key: 'red_zones', label: 'Red Zones', icon: <MapPin className="w-4 h-4" />, needs: ['zones'] },
+    { key: 'fraud', label: 'Fraud Alerts', icon: <AlertTriangle className="w-4 h-4" />, needs: ['alerts'] },
+    { key: 'customers', label: 'Customers', icon: <Users className="w-4 h-4" />, needs: ['customers'] },
+    { key: 'risk_matrix', label: 'Risk Matrix', icon: <BarChart3 className="w-4 h-4" />, needs: ['matrix'] },
+    { key: 'activity', label: 'Activity', icon: <Clock className="w-4 h-4" />, needs: ['logs'] },
+    { key: 'settings', label: 'Settings', icon: <Settings className="w-4 h-4" />, needs: ['settings'] },
   ];
+  // A list that did not load must never look like an empty list ("No fraud alerts"): the tab shows the error instead.
+  const loadError = tabs.find(t => t.key === tab).needs.map(need => brain[need].error).find(Boolean);
 
-  if (loading && !summary) return (
+  if (loading) return (
     <div className="p-8 text-center min-h-screen bg-t-base">
       <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-t-primary mb-4"></div>
       <p className="font-bold uppercase tracking-widest text-sm text-gray-500">Loading The Brain...</p>
@@ -197,7 +124,7 @@ export default function BrainDashboard() {
       <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
         <div className="flex items-center gap-3">
           <div className="p-2.5 rounded-xl bg-t-primary/10"><Brain className="w-5 h-5 text-t-primary" /></div>
-          <div><h1 className="text-lg font-black uppercase tracking-wider">The Brain</h1><p className={`text-xs ${mutedText}`}>Intelligence Engine v2 — Insights, Risk, Automation</p></div>
+          <div><h1 className="text-lg font-black uppercase tracking-wider">The Brain</h1><p className="text-xs text-t-muted">Intelligence Engine v2 — Insights, Risk, Automation</p></div>
         </div>
         <button onClick={runAnalysis} disabled={analyzing} className="flex items-center gap-2 px-4 py-2.5 bg-t-primary text-white rounded-lg hover:bg-t-primary/90 transition-all text-sm font-bold disabled:opacity-50">
           {analyzing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />} {analyzing ? 'Analyzing...' : 'Run Full Analysis'}
@@ -207,24 +134,33 @@ export default function BrainDashboard() {
       <div className="flex gap-1 flex-wrap mb-6 p-1 rounded-xl bg-t-base border border-t-border">
         {tabs.map(t => (
           <button key={t.key} onClick={() => setTab(t.key)}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all ${tab === t.key ? 'bg-t-primary text-white shadow-sm' : `text-${mutedText} hover:bg-t-primary/10 hover:text-t-primary`}`}>
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all ${tab === t.key ? 'bg-t-primary text-white shadow-sm' : 'text-t-muted hover:bg-t-primary/10 hover:text-t-primary'}`}>
             {t.icon} {t.label}
           </button>
         ))}
       </div>
 
-      {tab === 'overview' && <OverviewTab summary={summary} insights={insights} riskMatrix={riskMatrix} bgCard={bgCard} textColor={textColor} mutedText={mutedText} borderColor={borderColor} />}
-      {tab === 'red_zones' && <RedZonesTab zones={zones} zoneFilter={zoneFilter} setZoneFilter={setZoneFilter} bgCard={bgCard} textColor={textColor} mutedText={mutedText} borderColor={borderColor} />}
-      {tab === 'fraud' && <FraudAlertsTab alerts={alerts} alertFilter={alertFilter} setAlertFilter={setAlertFilter} onResolve={resolveAlert} onBulkResolve={bulkResolveAlerts} bgCard={bgCard} textColor={textColor} mutedText={mutedText} borderColor={borderColor} />}
-      {tab === 'customers' && <CustomersTab customers={customers} segmentFilter={segmentFilter} setSegmentFilter={setSegmentFilter} searchPhone={searchPhone} setSearchPhone={setSearchPhone} onSearch={searchCustomer} customerDetail={customerDetail} setCustomerDetail={setCustomerDetail} bgCard={bgCard} textColor={textColor} mutedText={mutedText} borderColor={borderColor} inputBg={inputBg} />}
-      {tab === 'risk_matrix' && <RiskMatrixTab matrix={riskMatrix} bgCard={bgCard} textColor={textColor} mutedText={mutedText} borderColor={borderColor} />}
-      {tab === 'activity' && <ActivityTab logs={activityLog} bgCard={bgCard} textColor={textColor} mutedText={mutedText} borderColor={borderColor} />}
-      {tab === 'settings' && <SettingsTab settings={settings} onUpdate={updateSetting} bgCard={bgCard} textColor={textColor} mutedText={mutedText} borderColor={borderColor} inputBg={inputBg} />}
+      {loadError ? (
+        <div role="alert" className="bg-t-surface rounded-xl border border-red-500/40 p-8 text-center">
+          <AlertTriangle className="w-6 h-6 text-red-500 mx-auto mb-3" />
+          <p className="text-sm font-bold text-t-main">This part of the Brain could not be loaded.</p>
+          <p className="text-sm text-t-muted mt-1">{loadError.message}</p>
+          <button onClick={reload} className="mt-4 px-4 py-2 bg-t-primary text-white rounded-lg text-xs font-bold hover:bg-t-primary/90 transition-all">Try again</button>
+        </div>
+      ) : <>
+        {tab === 'overview' && <OverviewTab summary={brain.summary.data} insights={brain.insights.data?.insights} riskMatrix={brain.matrix.data?.matrix ?? []} />}
+        {tab === 'red_zones' && <RedZonesTab zones={brain.zones.data?.zones ?? []} zoneFilter={zoneFilter} setZoneFilter={setZoneFilter} />}
+        {tab === 'fraud' && <FraudAlertsTab alerts={alerts} alertFilter={alertFilter} setAlertFilter={setAlertFilter} onResolve={resolveAlert} onBulkResolve={bulkResolveAlerts} />}
+        {tab === 'customers' && <CustomersTab customers={brain.customers.data?.customers ?? []} segmentFilter={segmentFilter} setSegmentFilter={setSegmentFilter} searchPhone={searchPhone} setSearchPhone={setSearchPhone} onSearch={searchCustomer} customerDetail={customerDetail} setCustomerDetail={setCustomerDetail} />}
+        {tab === 'risk_matrix' && <RiskMatrixTab matrix={brain.matrix.data?.matrix ?? []} />}
+        {tab === 'activity' && <ActivityTab logs={brain.logs.data?.logs ?? []} />}
+        {tab === 'settings' && <SettingsTab settings={brain.settings.data?.settings ?? []} onUpdate={updateSetting} />}
+      </>}
     </div>
   );
 }
 
-function OverviewTab({ summary, insights, riskMatrix, bgCard, textColor, mutedText, borderColor }) {
+function OverviewTab({ summary, insights, riskMatrix }) {
   const bs = summary?.brainSummary || {};
   const as = summary?.analyticsSummary?.totals || {};
 
@@ -241,59 +177,59 @@ function OverviewTab({ summary, insights, riskMatrix, bgCard, textColor, mutedTe
         { label: 'Avg Order Value', value: `৳${Number(as?.avg_order_value || 0).toLocaleString()}`, icon: <Activity className="w-4 h-4" />, color: 'text-purple-500' },
         { label: 'Risk Tiers', value: riskMatrix?.length || 0, icon: <Shield className="w-4 h-4" />, color: 'text-orange-500', sub: `${totalZones} zones / ${totalAlerts} alerts` },
       ].map((s, i) => (
-        <div key={i} className={`${bgCard} rounded-xl p-4 border ${borderColor}`}>
+        <div key={i} className="bg-t-surface rounded-xl p-4 border border-t-border">
           <div className="flex items-center justify-between mb-2">
-            <span className={`text-[10px] font-bold uppercase tracking-wider ${mutedText}`}>{s.label}</span>
+            <span className="text-[10px] font-bold uppercase tracking-wider text-t-muted">{s.label}</span>
             <span className={s.color}>{s.icon}</span>
           </div>
-          <div className={`text-2xl font-black ${textColor}`}>{s.value}</div>
+          <div className="text-2xl font-black text-t-main">{s.value}</div>
           {s.sub && <div className="text-xs text-t-muted mt-0.5">{s.sub}</div>}
         </div>
       ))}
     </div>
 
     {insights && <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-      <div className={`${bgCard} rounded-xl p-5 border ${borderColor}`}>
-        <h3 className={`text-xs font-bold uppercase tracking-wider ${mutedText} mb-4 flex items-center gap-2`}><MapPin className="w-3.5 h-3.5" /> Worst Performing Areas</h3>
+      <div className="bg-t-surface rounded-xl p-5 border border-t-border">
+        <h3 className="text-xs font-bold uppercase tracking-wider text-t-muted mb-4 flex items-center gap-2"><MapPin className="w-3.5 h-3.5" /> Worst Performing Areas</h3>
         {insights.worstAreas?.length > 0 ? <div className="space-y-2">
           {insights.worstAreas.map((a, i) => (
             <div key={i} className="flex items-center justify-between">
               <div className="flex items-center gap-2 min-w-0">
                 <span className={`w-1.5 h-1.5 rounded-full ${a.status === 'red' ? 'bg-red-500' : 'bg-amber-500'} shrink-0`}></span>
-                <span className={`text-sm truncate ${textColor}`}>{a.area_name || a.delivery_area}</span>
+                <span className="text-sm truncate text-t-main">{a.area_name || a.delivery_area}</span>
               </div>
               <div className="flex items-center gap-3 shrink-0">
-                <span className={`text-xs ${mutedText}`}>{a.total_orders} orders</span>
+                <span className="text-xs text-t-muted">{a.total_orders} orders</span>
                 <span className={`text-xs font-bold ${a.success_rate < 50 ? 'text-red-500' : 'text-amber-500'}`}>{a.success_rate}%</span>
               </div>
             </div>
           ))}
-        </div> : <p className={`text-sm ${mutedText} text-center py-4`}>No problem areas identified</p>}
+        </div> : <p className="text-sm text-t-muted text-center py-4">No problem areas identified</p>}
       </div>
 
-      <div className={`${bgCard} rounded-xl p-5 border ${borderColor}`}>
-        <h3 className={`text-xs font-bold uppercase tracking-wider ${mutedText} mb-4 flex items-center gap-2`}><AlertTriangle className="w-3.5 h-3.5" /> High Risk Customers</h3>
+      <div className="bg-t-surface rounded-xl p-5 border border-t-border">
+        <h3 className="text-xs font-bold uppercase tracking-wider text-t-muted mb-4 flex items-center gap-2"><AlertTriangle className="w-3.5 h-3.5" /> High Risk Customers</h3>
         {insights.highRiskCustomers?.length > 0 ? <div className="space-y-2 max-h-64 overflow-y-auto">
           {insights.highRiskCustomers.slice(0, 10).map((c, i) => (
             <div key={i} className="flex items-center justify-between">
               <div className="min-w-0">
-                <div className={`text-sm font-medium truncate ${textColor}`}>{c.name || c.phone}</div>
-                <div className={`text-xs ${mutedText}`}>{c.phone} • {c.total_orders} orders • {c.segment}</div>
+                <div className="text-sm font-medium truncate text-t-main">{c.name || c.phone}</div>
+                <div className="text-xs text-t-muted">{c.phone} • {c.total_orders} orders • {c.segment}</div>
               </div>
               <span className={`text-xs font-bold shrink-0 ${c.risk_score >= 70 ? 'text-red-500' : c.risk_score >= 50 ? 'text-orange-500' : 'text-yellow-500'}`}>{c.risk_score}</span>
             </div>
           ))}
-        </div> : <p className={`text-sm ${mutedText} text-center py-4`}>No high-risk customers</p>}
+        </div> : <p className="text-sm text-t-muted text-center py-4">No high-risk customers</p>}
       </div>
 
-      {insights.churnRisks?.length > 0 && <div className={`${bgCard} rounded-xl p-5 border ${borderColor}`}>
-        <h3 className={`text-xs font-bold uppercase tracking-wider ${mutedText} mb-4 flex items-center gap-2`}><TrendingDown className="w-3.5 h-3.5" /> Churn Risk Customers</h3>
+      {insights.churnRisks?.length > 0 && <div className="bg-t-surface rounded-xl p-5 border border-t-border">
+        <h3 className="text-xs font-bold uppercase tracking-wider text-t-muted mb-4 flex items-center gap-2"><TrendingDown className="w-3.5 h-3.5" /> Churn Risk Customers</h3>
         <div className="space-y-2">
           {insights.churnRisks.slice(0, 5).map((c, i) => (
             <div key={i} className="flex items-center justify-between">
               <div className="min-w-0">
-                <div className={`text-sm font-medium truncate ${textColor}`}>{c.name || c.phone}</div>
-                <div className={`text-xs ${mutedText}`}>{c.days_since_last_order}d inactive • Predicted: ৳{Number(c.predicted_ltv || 0).toLocaleString()}</div>
+                <div className="text-sm font-medium truncate text-t-main">{c.name || c.phone}</div>
+                <div className="text-xs text-t-muted">{c.days_since_last_order}d inactive • Predicted: ৳{Number(c.predicted_ltv || 0).toLocaleString()}</div>
               </div>
               <span className={`text-xs font-bold ${c.churn_risk >= 70 ? 'text-red-500' : 'text-orange-500'}`}>{c.churn_risk}%</span>
             </div>
@@ -301,14 +237,14 @@ function OverviewTab({ summary, insights, riskMatrix, bgCard, textColor, mutedTe
         </div>
       </div>}
 
-      {insights.topCustomers?.length > 0 && <div className={`${bgCard} rounded-xl p-5 border ${borderColor}`}>
-        <h3 className={`text-xs font-bold uppercase tracking-wider ${mutedText} mb-4 flex items-center gap-2`}><TrendingUp className="w-3.5 h-3.5" /> Top Customers by LTV</h3>
+      {insights.topCustomers?.length > 0 && <div className="bg-t-surface rounded-xl p-5 border border-t-border">
+        <h3 className="text-xs font-bold uppercase tracking-wider text-t-muted mb-4 flex items-center gap-2"><TrendingUp className="w-3.5 h-3.5" /> Top Customers by LTV</h3>
         <div className="space-y-2">
           {insights.topCustomers.map((c, i) => (
             <div key={i} className="flex items-center justify-between">
               <div className="min-w-0">
-                <div className={`text-sm font-medium truncate ${textColor}`}>{c.name || c.phone}</div>
-                <div className={`text-xs ${mutedText}`}>{c.total_orders} orders • ৳{Number(c.total_spent).toLocaleString()} • {c.segment}</div>
+                <div className="text-sm font-medium truncate text-t-main">{c.name || c.phone}</div>
+                <div className="text-xs text-t-muted">{c.total_orders} orders • ৳{Number(c.total_spent).toLocaleString()} • {c.segment}</div>
               </div>
               <span className={`text-xs font-bold ${segmentColors[c.segment] || 'text-gray-500'}`}>{c.ltv_score}</span>
             </div>
@@ -319,8 +255,8 @@ function OverviewTab({ summary, insights, riskMatrix, bgCard, textColor, mutedTe
   </div>;
 }
 
-function RedZonesTab({ zones, zoneFilter, setZoneFilter, bgCard, textColor, mutedText, borderColor }) {
-  return <div className={`${bgCard} rounded-xl border ${borderColor} overflow-hidden`}>
+function RedZonesTab({ zones, zoneFilter, setZoneFilter }) {
+  return <div className="bg-t-surface rounded-xl border border-t-border overflow-hidden">
     <div className="p-4 border-b border-t-border flex gap-2">
       {['', 'red', 'amber', 'safe'].map(s => (
         <button key={s} onClick={() => setZoneFilter(s)}
@@ -330,8 +266,8 @@ function RedZonesTab({ zones, zoneFilter, setZoneFilter, bgCard, textColor, mute
       ))}
     </div>
     <div className="overflow-x-auto">
-      {zones.length === 0 ? <p className={`p-8 text-center text-sm ${mutedText}`}>No zones found</p> : <table className="w-full text-sm">
-        <thead><tr className={`border-b ${borderColor} text-xs ${mutedText} uppercase tracking-wider`}>
+      {zones.length === 0 ? <p className="p-8 text-center text-sm text-t-muted">No zones found</p> : <table className="w-full text-sm">
+        <thead><tr className="border-b border-t-border text-xs text-t-muted uppercase tracking-wider">
           <th className="text-left p-4 font-bold">Area</th>
           <th className="text-right p-4 font-bold">Orders</th>
           <th className="text-right p-4 font-bold">Delivered</th>
@@ -340,9 +276,9 @@ function RedZonesTab({ zones, zoneFilter, setZoneFilter, bgCard, textColor, mute
           <th className="text-right p-4 font-bold">Status</th>
         </tr></thead>
         <tbody>{zones.map(z => (
-          <tr key={z.id} className={`border-b ${borderColor} hover:bg-t-primary/5 transition-colors`}>
-            <td className="p-4"><span className={`font-medium ${textColor}`}>{z.area_name || z.delivery_area}</span></td>
-            <td className="p-4 text-right"><span className={textColor}>{z.total_orders}</span></td>
+          <tr key={z.id} className="border-b border-t-border hover:bg-t-primary/5 transition-colors">
+            <td className="p-4"><span className="font-medium text-t-main">{z.area_name || z.delivery_area}</span></td>
+            <td className="p-4 text-right"><span className="text-t-main">{z.total_orders}</span></td>
             <td className="p-4 text-right"><span className="text-green-500">{z.delivered_count}</span></td>
             <td className="p-4 text-right"><span className="text-red-500">{z.failed_count}</span></td>
             <td className="p-4 text-right"><span className={`font-bold ${z.status === 'red' ? 'text-red-500' : z.status === 'amber' ? 'text-amber-500' : 'text-green-500'}`}>{z.success_rate}%</span></td>
@@ -356,9 +292,9 @@ function RedZonesTab({ zones, zoneFilter, setZoneFilter, bgCard, textColor, mute
   </div>;
 }
 
-function FraudAlertsTab({ alerts, alertFilter, setAlertFilter, onResolve, onBulkResolve, bgCard, textColor, mutedText, borderColor }) {
+function FraudAlertsTab({ alerts, alertFilter, setAlertFilter, onResolve, onBulkResolve }) {
   const unresolved = alerts.filter(a => !a.resolved_at);
-  return <div className={`${bgCard} rounded-xl border ${borderColor} overflow-hidden`}>
+  return <div className="bg-t-surface rounded-xl border border-t-border overflow-hidden">
     <div className="p-4 border-b border-t-border flex items-center justify-between flex-wrap gap-2">
       <div className="flex gap-2">
         {['', 'high', 'medium', 'low'].map(s => (
@@ -373,30 +309,30 @@ function FraudAlertsTab({ alerts, alertFilter, setAlertFilter, onResolve, onBulk
       </button>}
     </div>
     <div className="p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-      {alerts.length === 0 ? <p className={`col-span-full text-center py-8 text-sm ${mutedText}`}>No fraud alerts</p> : alerts.map(a => (
-        <div key={a.id} className={`p-4 rounded-xl border ${borderColor} ${a.resolved_at ? 'opacity-60' : ''}`}>
+      {alerts.length === 0 ? <p className="col-span-full text-center py-8 text-sm text-t-muted">No fraud alerts</p> : alerts.map(a => (
+        <div key={a.id} className={`p-4 rounded-xl border border-t-border ${a.resolved_at ? 'opacity-60' : ''}`}>
           <div className="flex items-center justify-between mb-2">
-            <span className={`text-sm font-bold ${textColor}`}>{a.name || a.phone}</span>
+            <span className="text-sm font-bold text-t-main">{a.name || a.phone}</span>
             <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${a.risk_level === 'high' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' : a.risk_level === 'medium' ? 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300' : 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300'}`}>{a.risk_level}</span>
           </div>
-          <p className={`text-xs ${mutedText} mb-1`}>{a.phone}</p>
-          <p className={`text-xs ${mutedText} mb-2`}>{a.reason}</p>
+          <p className="text-xs text-t-muted mb-1">{a.phone}</p>
+          <p className="text-xs text-t-muted mb-2">{a.reason}</p>
           <div className="flex items-center justify-between">
             <div className="flex gap-3 text-xs">
-              <span className={textColor}>{a.total_orders} orders</span>
+              <span className="text-t-main">{a.total_orders} orders</span>
               <span className="text-red-500">{a.failed_deliveries} failed</span>
               <span className={a.success_rate < 50 ? 'text-red-500' : 'text-green-500'}>{a.success_rate}%</span>
             </div>
-            {!a.resolved_at && <button onClick={() => onResolve(a.id)} className="p-1 rounded hover:bg-green-100 dark:hover:bg-green-900/30"><CheckCircle2 className="w-4 h-4 text-green-500" /></button>}
+            {!a.resolved_at && <button onClick={() => onResolve(a.id)} title="Resolve" aria-label="Resolve" className="p-1 rounded hover:bg-green-100 dark:hover:bg-green-900/30"><CheckCircle2 className="w-4 h-4 text-green-500" /></button>}
           </div>
-          {a.resolved_at && <p className={`text-[10px] ${mutedText} mt-2`}>Resolved {new Date(a.resolved_at).toLocaleDateString()} by {a.resolved_by}</p>}
+          {a.resolved_at && <p className="text-[10px] text-t-muted mt-2">Resolved {new Date(a.resolved_at).toLocaleDateString()} by {a.resolved_by}</p>}
         </div>
       ))}
     </div>
   </div>;
 }
 
-function CustomersTab({ customers, segmentFilter, setSegmentFilter, searchPhone, setSearchPhone, onSearch, customerDetail, setCustomerDetail, bgCard, textColor, mutedText, borderColor, inputBg }) {
+function CustomersTab({ customers, segmentFilter, setSegmentFilter, searchPhone, setSearchPhone, onSearch, customerDetail, setCustomerDetail }) {
   return <div className="space-y-4">
     <div className="flex gap-2 items-center flex-wrap">
       <div className="flex gap-1">
@@ -409,14 +345,14 @@ function CustomersTab({ customers, segmentFilter, setSegmentFilter, searchPhone,
       </div>
       <div className="flex gap-2 ml-auto">
         <input type="text" placeholder="Search phone..." value={searchPhone} onChange={e => setSearchPhone(e.target.value)} onKeyDown={e => e.key === 'Enter' && onSearch()}
-          className={`w-48 px-3 py-1.5 rounded-lg text-sm border ${borderColor} ${inputBg} focus:outline-none focus:ring-2 focus:ring-t-primary/40`} />
+          className="w-48 px-3 py-1.5 rounded-lg text-sm border border-t-border bg-t-surface text-t-main focus:outline-none focus:ring-2 focus:ring-t-primary/40" />
         <button onClick={onSearch} className="px-3 py-1.5 bg-t-primary text-white rounded-lg text-xs font-bold"><Search className="w-3.5 h-3.5" /></button>
       </div>
     </div>
 
-    {customerDetail && <div className={`${bgCard} rounded-xl p-5 border ${borderColor}`}>
+    {customerDetail && <div className="bg-t-surface rounded-xl p-5 border border-t-border">
       <div className="flex items-center justify-between mb-4">
-        <h3 className={`text-sm font-bold ${textColor}`}>Customer: {customerDetail.customer?.name || customerDetail.customer?.phone}</h3>
+        <h3 className="text-sm font-bold text-t-main">Customer: {customerDetail.customer?.name || customerDetail.customer?.phone}</h3>
         <button onClick={() => setCustomerDetail(null)} className="p-1 rounded hover:bg-t-primary/10"><X className="w-4 h-4 text-t-muted" /></button>
       </div>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
@@ -431,20 +367,20 @@ function CustomersTab({ customers, segmentFilter, setSegmentFilter, searchPhone,
           { label: 'Predicted LTV', value: `৳${Number(customerDetail.customer?.predicted_ltv || 0).toLocaleString()}` },
         ].map((s, i) => (
           <div key={i} className="p-3 rounded-lg bg-t-base border border-t-border">
-            <div className={`text-[10px] font-bold uppercase tracking-wider ${mutedText}`}>{s.label}</div>
-            <div className={`text-sm font-bold ${textColor}`}>{s.value || '-'}</div>
+            <div className="text-[10px] font-bold uppercase tracking-wider text-t-muted">{s.label}</div>
+            <div className="text-sm font-bold text-t-main">{s.value ?? '-'}</div>
           </div>
         ))}
       </div>
       {customerDetail.fraudAlerts?.length > 0 && <div>
-        <h4 className={`text-xs font-bold ${mutedText} mb-2 uppercase tracking-wider`}>Fraud History</h4>
+        <h4 className="text-xs font-bold text-t-muted mb-2 uppercase tracking-wider">Fraud History</h4>
         <div className="space-y-1">
           {customerDetail.fraudAlerts.map(fa => (
             <div key={fa.id} className={`flex items-center justify-between p-2 rounded-lg text-xs ${fa.resolved_at ? 'opacity-50' : ''} ${fa.risk_level === 'high' ? 'bg-red-500/5' : 'bg-yellow-500/5'}`}>
-              <span className={textColor}>{fa.reason}</span>
+              <span className="text-t-main">{fa.reason}</span>
               <div className="flex items-center gap-2">
                 <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${fa.risk_level === 'high' ? 'text-red-500' : 'text-yellow-500'}`}>{fa.risk_level}</span>
-                {fa.resolved_at && <span className={mutedText}>Resolved {new Date(fa.resolved_at).toLocaleDateString()}</span>}
+                {fa.resolved_at && <span className="text-t-muted">Resolved {new Date(fa.resolved_at).toLocaleDateString()}</span>}
               </div>
             </div>
           ))}
@@ -452,10 +388,10 @@ function CustomersTab({ customers, segmentFilter, setSegmentFilter, searchPhone,
       </div>}
     </div>}
 
-    <div className={`${bgCard} rounded-xl border ${borderColor} overflow-hidden`}>
+    <div className="bg-t-surface rounded-xl border border-t-border overflow-hidden">
       <div className="overflow-x-auto">
-        {customers.length === 0 ? <p className={`p-8 text-center text-sm ${mutedText}`}>No customers found</p> : <table className="w-full text-sm">
-          <thead><tr className={`border-b ${borderColor} text-xs ${mutedText} uppercase tracking-wider`}>
+        {customers.length === 0 ? <p className="p-8 text-center text-sm text-t-muted">No customers found</p> : <table className="w-full text-sm">
+          <thead><tr className="border-b border-t-border text-xs text-t-muted uppercase tracking-wider">
             <th className="text-left p-4 font-bold">Phone</th>
             <th className="text-left p-4 font-bold">Name</th>
             <th className="text-right p-4 font-bold">Orders</th>
@@ -467,9 +403,9 @@ function CustomersTab({ customers, segmentFilter, setSegmentFilter, searchPhone,
             <th className="text-right p-4 font-bold">Segment</th>
           </tr></thead>
           <tbody>{customers.map(c => (
-            <tr key={c.id} className={`border-b ${borderColor} hover:bg-t-primary/5 transition-colors`}>
+            <tr key={c.id} className="border-b border-t-border hover:bg-t-primary/5 transition-colors">
               <td className="p-4"><span className="font-mono text-xs text-t-muted">{c.phone}</span></td>
-              <td className="p-4"><span className={`font-medium ${textColor}`}>{c.name || '-'}</span></td>
+              <td className="p-4"><span className="font-medium text-t-main">{c.name || '-'}</span></td>
               <td className="p-4 text-right">{c.total_orders}</td>
               <td className="p-4 text-right font-medium">৳{Number(c.total_spent).toLocaleString()}</td>
               <td className="p-4 text-right">৳{Number(c.avg_order_value).toLocaleString()}</td>
@@ -494,16 +430,16 @@ function CustomersTab({ customers, segmentFilter, setSegmentFilter, searchPhone,
   </div>;
 }
 
-function RiskMatrixTab({ matrix, bgCard, textColor, mutedText, borderColor }) {
+function RiskMatrixTab({ matrix }) {
   const tierMeta = { critical: { label: 'Critical Risk', color: 'text-red-500', bar: 'bg-red-500', bg: 'bg-red-500/5' }, high: { label: 'High Risk', color: 'text-orange-500', bar: 'bg-orange-500', bg: 'bg-orange-500/5' }, medium: { label: 'Medium Risk', color: 'text-yellow-500', bar: 'bg-yellow-500', bg: 'bg-yellow-500/5' }, low: { label: 'Low Risk', color: 'text-blue-500', bar: 'bg-blue-500', bg: 'bg-blue-500/5' }, minimal: { label: 'Minimal Risk', color: 'text-green-500', bar: 'bg-green-500', bg: 'bg-green-500/5' } };
-  const maxCount = Math.max(...(matrix.map(r => r.count) || [1]), 1);
+  const maxCount = Math.max(...matrix.map(r => r.count), 1);
 
-  return <div className={`${bgCard} rounded-xl p-6 border ${borderColor}`}>
-    <h3 className={`text-xs font-bold uppercase tracking-wider ${mutedText} mb-6`}>Customer Risk Distribution</h3>
+  return <div className="bg-t-surface rounded-xl p-6 border border-t-border">
+    <h3 className="text-xs font-bold uppercase tracking-wider text-t-muted mb-6">Customer Risk Distribution</h3>
     <div className="space-y-4">
-      {matrix.length === 0 ? <p className={`text-sm ${mutedText} text-center py-8`}>No risk data available. Run analysis first.</p> : matrix.map((row, i) => {
+      {matrix.length === 0 ? <p className="text-sm text-t-muted text-center py-8">No risk data available. Run analysis first.</p> : matrix.map((row, i) => {
         const meta = tierMeta[row.risk_tier] || { label: row.risk_tier, color: 'text-gray-500', bar: 'bg-gray-500', bg: 'bg-gray-500/5' };
-        return <div key={i} className={`p-4 rounded-xl ${meta.bg} border ${borderColor}`}>
+        return <div key={i} className={`p-4 rounded-xl ${meta.bg} border border-t-border`}>
           <div className="flex items-center justify-between mb-2">
             <span className={`text-sm font-bold ${meta.color}`}>{meta.label}</span>
             <span className={`text-lg font-black ${meta.color}`}>{row.count}</span>
@@ -512,9 +448,9 @@ function RiskMatrixTab({ matrix, bgCard, textColor, mutedText, borderColor }) {
             <div className={`h-full ${meta.bar} rounded-full transition-all duration-500`} style={{ width: `${(row.count / maxCount) * 100}%` }}></div>
           </div>
           <div className="grid grid-cols-3 gap-3 text-xs">
-            <div><span className={mutedText}>Avg Spend</span><p className={`font-bold ${textColor}`}>৳{Number(row.avg_spent).toLocaleString()}</p></div>
-            <div><span className={mutedText}>Avg LTV</span><p className={`font-bold ${textColor}`}>{row.avg_ltv}</p></div>
-            <div><span className={mutedText}>Success Rate</span><p className={`font-bold ${textColor}`}>{row.avg_success_rate}%</p></div>
+            <div><span className="text-t-muted">Avg Spend</span><p className="font-bold text-t-main">৳{Number(row.avg_spent).toLocaleString()}</p></div>
+            <div><span className="text-t-muted">Avg LTV</span><p className="font-bold text-t-main">{row.avg_ltv}</p></div>
+            <div><span className="text-t-muted">Success Rate</span><p className="font-bold text-t-main">{row.avg_success_rate}%</p></div>
           </div>
         </div>;
       })}
@@ -522,7 +458,7 @@ function RiskMatrixTab({ matrix, bgCard, textColor, mutedText, borderColor }) {
   </div>;
 }
 
-function ActivityTab({ logs, bgCard, textColor, mutedText, borderColor }) {
+function ActivityTab({ logs }) {
   const actionMeta = {
     full_analysis: { label: 'Full Analysis', color: 'text-blue-500', icon: '🔬' },
     auto_resolve: { label: 'Auto Resolve', color: 'text-green-500', icon: '🤖' },
@@ -531,9 +467,9 @@ function ActivityTab({ logs, bgCard, textColor, mutedText, borderColor }) {
     update_setting: { label: 'Setting Changed', color: 'text-purple-500', icon: '⚙️' },
   };
 
-  return <div className={`${bgCard} rounded-xl border ${borderColor} overflow-hidden`}>
-    <div className="p-4 border-b border-t-border"><h3 className={`text-xs font-bold uppercase tracking-wider ${mutedText}`}>Recent Brain Activity</h3></div>
-    {logs.length === 0 ? <p className={`p-8 text-center text-sm ${mutedText}`}>No activity logged yet</p> : <div className="divide-y divide-t-border">
+  return <div className="bg-t-surface rounded-xl border border-t-border overflow-hidden">
+    <div className="p-4 border-b border-t-border"><h3 className="text-xs font-bold uppercase tracking-wider text-t-muted">Recent Brain Activity</h3></div>
+    {logs.length === 0 ? <p className="p-8 text-center text-sm text-t-muted">No activity logged yet</p> : <div className="divide-y divide-t-border">
       {logs.map((log, i) => {
         const meta = actionMeta[log.action] || { label: log.action, color: 'text-gray-500', icon: '•' };
         return <div key={log.id || i} className="p-4 flex items-start gap-3">
@@ -541,10 +477,10 @@ function ActivityTab({ logs, bgCard, textColor, mutedText, borderColor }) {
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
               <span className={`text-xs font-bold ${meta.color}`}>{meta.label}</span>
-              {log.entity_id && <span className={`text-[10px] font-mono ${mutedText}`}>{log.entity_id}</span>}
+              {log.entity_id && <span className="text-[10px] font-mono text-t-muted">{log.entity_id}</span>}
             </div>
-            {log.entity_type && <p className={`text-xs ${mutedText}`}>{log.entity_type}</p>}
-            <p className={`text-[10px] ${mutedText} mt-0.5`}>{log.performed_by} • {new Date(log.created_at).toLocaleString()}</p>
+            {log.entity_type && <p className="text-xs text-t-muted">{log.entity_type}</p>}
+            <p className="text-[10px] text-t-muted mt-0.5">{log.performed_by} • {new Date(log.created_at).toLocaleString()}</p>
           </div>
         </div>;
       })}
@@ -552,7 +488,7 @@ function ActivityTab({ logs, bgCard, textColor, mutedText, borderColor }) {
   </div>;
 }
 
-function SettingsTab({ settings, onUpdate, bgCard, textColor, mutedText, borderColor, inputBg }) {
+function SettingsTab({ settings, onUpdate }) {
   const [editing, setEditing] = useState({});
   const settingMeta = {
     red_threshold: { label: 'Red Zone Threshold', desc: 'Success rate below this (%) = Red Zone', unit: '%' },
@@ -570,28 +506,38 @@ function SettingsTab({ settings, onUpdate, bgCard, textColor, mutedText, borderC
     min_orders_fraud_flag: { label: 'Min Orders Fraud Flag', desc: 'Min orders before flagging for fraud', unit: '' },
   };
 
+  const stopEditing = (key) => setEditing(p => { const n = { ...p }; delete n[key]; return n; });
+
   const saveSetting = async (key) => {
-    if (editing[key] !== undefined) { await onUpdate(key, editing[key]); setEditing(p => { const n = { ...p }; delete n[key]; return n; }); }
+    const value = editing[key];
+    if (value === undefined) return;
+    const isPercent = settingMeta[key]?.unit === '%';
+    const number = Number(value);
+    if (String(value).trim() === '' || !Number.isFinite(number) || number < 0 || (isPercent && number > 100)) {
+      return toast.error(isPercent ? 'Enter a number from 0 to 100.' : 'Enter a number that is 0 or more.');
+    }
+    // If the server says no, the box stays open so the typed value is not lost.
+    if (await onUpdate(key, value)) stopEditing(key);
   };
 
-  return <div className={`${bgCard} rounded-xl border ${borderColor} overflow-hidden`}>
-    <div className="p-4 border-b border-t-border"><h3 className={`text-xs font-bold uppercase tracking-wider ${mutedText}`}>Brain Configuration — All thresholds are dynamic</h3></div>
+  return <div className="bg-t-surface rounded-xl border border-t-border overflow-hidden">
+    <div className="p-4 border-b border-t-border"><h3 className="text-xs font-bold uppercase tracking-wider text-t-muted">Brain Configuration — All thresholds are dynamic</h3></div>
     <div className="divide-y divide-t-border">
       {settings.map(s => {
         const meta = settingMeta[s.key] || { label: s.key, desc: s.description, unit: '' };
         return <div key={s.key} className="p-4 flex items-center justify-between gap-4">
           <div className="min-w-0 flex-1">
-            <div className={`text-sm font-medium ${textColor}`}>{meta.label}</div>
-            <div className={`text-xs ${mutedText}`}>{meta.desc}</div>
+            <div className="text-sm font-medium text-t-main">{meta.label}</div>
+            <div className="text-xs text-t-muted">{meta.desc}</div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
             {editing[s.key] !== undefined ? <>
               <input type="number" value={editing[s.key]} onChange={e => setEditing(p => ({ ...p, [s.key]: e.target.value }))}
-                className={`w-20 px-2 py-1.5 rounded-lg text-sm text-center border ${borderColor} ${inputBg} focus:outline-none focus:ring-2 focus:ring-t-primary/40`} />
+                className="w-20 px-2 py-1.5 rounded-lg text-sm text-center border border-t-border bg-t-base text-t-main focus:outline-none focus:ring-2 focus:ring-t-primary/40" />
               <button onClick={() => saveSetting(s.key)} className="px-2.5 py-1.5 bg-t-primary text-white rounded-lg text-xs font-bold hover:bg-t-primary/90">Save</button>
-              <button onClick={() => setEditing(p => { const n = { ...p }; delete n[s.key]; return n; })} className="px-2.5 py-1.5 rounded-lg text-xs font-bold border border-t-border hover:bg-t-primary/5">Cancel</button>
+              <button onClick={() => stopEditing(s.key)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold border border-t-border hover:bg-t-primary/5">Cancel</button>
             </> : <>
-              <span className={`text-sm font-bold ${textColor} font-mono`}>{s.value}{meta.unit}</span>
+              <span className="text-sm font-bold text-t-main font-mono">{s.value}{meta.unit}</span>
               <button onClick={() => setEditing(p => ({ ...p, [s.key]: s.value }))} className="px-2.5 py-1.5 rounded-lg text-xs font-bold border border-t-border hover:bg-t-primary/5 transition-all"><Settings className="w-3 h-3" /></button>
             </>}
           </div>

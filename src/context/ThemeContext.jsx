@@ -38,7 +38,8 @@ export const ThemeProvider = ({ children }) => {
     const root = window.document.documentElement;
     AVAILABLE_THEMES.forEach(t => root.classList.remove(t.id));
     root.classList.add(adminTheme);
-  }, [adminTheme]);
+    root.dataset.mode = isAdminDark ? 'dark' : 'light'; // read by the `dark:` variant in index.css
+  }, [adminTheme, isAdminDark]);
 
   useEffect(() => {
     let cancelled = false;

@@ -182,7 +182,7 @@ function AdminRoutes() {
         <Route path="/bulk-upload" element={<Navigate to="/bulk-product-upload" replace />} />
         <Route path="/district-map" element={<Navigate to="/admin/command-center" replace />} />
         <Route path="/admin/live-dashboard" element={<Navigate to="/admin/command-center" replace />} />
-        <Route path="/admin/brain" element={<Navigate to="/admin/command-center" replace />} />
+        <Route path="/admin/brain" element={<Navigate to="/admin/command-center?tab=ai" replace />} />
         <Route path="/admin/profit" element={<Navigate to="/admin/financial" replace />} />
         <Route path="/admin/financial-audit" element={<Navigate to="/admin/financial" replace />} />
         <Route path="/profit-sales" element={<Navigate to="/admin/financial" replace />} />

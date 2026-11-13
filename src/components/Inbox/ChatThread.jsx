@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Send, ArrowLeft } from 'lucide-react';
 import API_BASE_URL from '../../config/api';
 import { useWebSocket } from '../../context/WebSocketContext';
+import ChatMedia from './ChatMedia';
 
 function mergeMessages(...messageLists) {
   const messages = [];
@@ -207,7 +208,8 @@ export default function ChatThread({ conversationId, conversation, isDark, onBac
                 {!isOutbound && msg.sender_name && (
                   <p className="text-[10px] font-bold opacity-70 mb-0.5">{msg.sender_name}</p>
                 )}
-                <p className="text-sm whitespace-pre-wrap break-words">{msg.content}</p>
+                {msg.has_media ? <ChatMedia message={msg} isOutbound={isOutbound} isDark={isDark} /> : null}
+                {msg.content && <p className="text-sm whitespace-pre-wrap break-words">{msg.content}</p>}
                 <p className={`text-[9px] mt-1 ${isOutbound ? 'text-white/60' : 'text-t-muted'}`}>
                   {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                 </p>

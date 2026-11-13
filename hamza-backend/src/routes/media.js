@@ -1,11 +1,12 @@
 import express from 'express';
-import { asyncHandler, HttpError } from '../lib/httpError.js';
+import { asyncHandler, badRequest, HttpError } from '../lib/httpError.js';
 import { verifyMediaToken } from '../lib/mediaSignature.js';
 import { toBuffer } from '../services/legacyBlobStore.js';
 import { resolveMessageMedia } from '../services/attachmentResolver.js';
 import { buildProxyUrl } from '../services/attachmentResolver.js';
 import { signMediaToken } from '../lib/mediaSignature.js';
 import { withTimeout, withTimeoutFallback } from '../lib/withTimeout.js';
+import { resolveCacheControlSeconds } from '../services/mediaStorage.js';
 
 /** Upper bound for any DB/Graph call made while serving an <img>. */
 const LOOKUP_TIMEOUT_MS = 2_000;
@@ -159,6 +160,136 @@ function extractMaybeId(token) {
   } catch {
     return ':messageId';
   }
+}
+
+/**
+ * LIFE-CYCLE ROUTES — the contract `src/lib/mediaClient.js` already calls.
+ *
+ *   POST /api/media/delete         { urls: string[] }
+ *     -> { deleted: string[], skipped: string[], reasons: Record<string,string> }
+ *
+ *   POST /api/media/cache-control  { urls: string[] }   (ops/backfill only)
+ *     -> { updated: string[], skipped: string[], reasons: Record<string,string> }
+ *
+ * Both are admin-only (mounted behind `requireAdmin` in app.js), idempotent,
+ * bounded per request, and fail closed: a URL is only deleted when a
+ * `media_references` row proves nothing points at it (see migration 003).
+ * Per-URL refusals are 200 + `skipped`, never a 4xx, so one bad URL cannot
+ * make the browser abandon the rest of the sweep.
+ */
+const MAX_MEDIA_URL_LENGTH = 2_048;
+
+function readMediaUrls(value, limit) {
+  if (!Array.isArray(value)) throw badRequest('`urls` must be an array of strings.');
+  if (value.length > limit) throw badRequest(`At most ${limit} URLs per request.`);
+
+  const unique = [];
+  const seen = new Set();
+  for (const entry of value) {
+    if (typeof entry !== 'string') continue;
+    const url = entry.trim();
+    if (!url || url.length > MAX_MEDIA_URL_LENGTH) continue;
+    if (seen.has(url)) continue;
+    seen.add(url);
+    unique.push(url);
+  }
+  return unique;
+}
+
+export function createMediaLifecycleRouter({ env = {}, logger, storage }) {
+  if (!storage) throw new Error('createMediaLifecycleRouter requires a media storage adapter');
+
+  const router = express.Router();
+  const deleteEnabled = env.MEDIA_DELETE_ENABLED === true || env.MEDIA_DELETE_ENABLED === 'true';
+  const maxDeleteUrls = Number(env.MEDIA_DELETE_MAX_URLS) || 50;
+  const maxCacheUrls = Number(env.MEDIA_CACHE_CONTROL_MAX_URLS) || 10;
+  const cacheSeconds = resolveCacheControlSeconds(env.MEDIA_UPLOAD_CACHE_CONTROL_SECONDS);
+
+  router.post('/delete', asyncHandler(async (req, res) => {
+    const urls = readMediaUrls(req.body?.urls, maxDeleteUrls);
+    const deleted = [];
+    const skipped = [];
+    const reasons = {};
+
+    if (!deleteEnabled) {
+      for (const url of urls) {
+        skipped.push(url);
+        reasons[url] = 'disabled';
+      }
+      logger?.info(`media delete: disabled (${urls.length} URL(s) ignored)`);
+      return res.json({ success: true, deleted, skipped, reasons, disabled: true });
+    }
+
+    // Parse first, then verify the whole batch with one reference query.
+    const candidates = [];
+    for (const url of urls) {
+      const parsed = storage.parse(url);
+      if (!parsed.ok) {
+        skipped.push(url);
+        reasons[url] = parsed.reason;
+      } else {
+        candidates.push({ url, ...parsed });
+      }
+    }
+
+    const references = await storage.referencedKeys(candidates.map((c) => c.storageKey));
+
+    for (const candidate of candidates) {
+      if (!references.ok) {
+        skipped.push(candidate.url);
+        reasons[candidate.url] = references.reason || 'references-unavailable';
+        continue;
+      }
+      // A shared photo must survive one product's delete.
+      if (references.referenced.has(candidate.storageKey)) {
+        skipped.push(candidate.url);
+        reasons[candidate.url] = 'referenced';
+        continue;
+      }
+
+      const result = await storage.removeObject(candidate);
+      if (result.ok) {
+        deleted.push(candidate.url);
+      } else {
+        skipped.push(candidate.url);
+        reasons[candidate.url] = result.reason || 'storage-error';
+      }
+    }
+
+    if (urls.length) {
+      logger?.info(`media delete: ${deleted.length} removed, ${skipped.length} skipped`);
+    }
+    return res.json({ success: true, deleted, skipped, reasons });
+  }));
+
+  router.post('/cache-control', asyncHandler(async (req, res) => {
+    const urls = readMediaUrls(req.body?.urls, maxCacheUrls);
+    const seconds = cacheSeconds;
+    const updated = [];
+    const skipped = [];
+    const reasons = {};
+
+    for (const url of urls) {
+      const parsed = storage.parse(url);
+      if (!parsed.ok) {
+        skipped.push(url);
+        reasons[url] = parsed.reason;
+        continue;
+      }
+      const result = await storage.rewriteCacheControl(parsed, seconds);
+      if (result.ok) {
+        updated.push(url);
+      } else {
+        skipped.push(url);
+        reasons[url] = result.reason || 'storage-error';
+      }
+    }
+
+    if (urls.length) logger?.info(`media cache-control: ${updated.length} updated, ${skipped.length} skipped`);
+    return res.json({ success: true, updated, skipped, reasons, cacheControl: `max-age=${seconds}` });
+  }));
+
+  return router;
 }
 
 export { buildProxyUrl };

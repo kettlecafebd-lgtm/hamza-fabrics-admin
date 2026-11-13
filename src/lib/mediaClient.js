@@ -30,13 +30,35 @@
  *   2. A server-side garbage collector is still required, because a client
  *      sweep cannot see deleted-in-another-tab or failed-in-flight uploads.
  *      See DB_AUDIT.md / MEDIA_AUDIT.md for the reconciliation job.
+ *
+ * WHERE THE REQUEST GOES
+ * ----------------------
+ * `deleteMedia()` posts to `POST /api/media/delete` on the media backend
+ * (`hamza-backend/src/routes/media.js`), which now implements the contract:
+ *
+ *   request   { urls: string[] }              (Bearer admin token)
+ *   response  { deleted: string[], skipped: string[], reasons?: Record<string,string> }
+ *
+ * The route is deliberately conservative: it removes an object only when the
+ * `media_references` view (migration 003) proves nothing points at it, and it
+ * stays inert until `MEDIA_DELETE_ENABLED=true`. Every refusal comes back in
+ * `skipped` with a machine-readable `reasons[url]` (`referenced`, `disabled`,
+ * `legacy-disk`, `foreign-host`, `references-unavailable`, …) — none of which
+ * is an error, so an operator's save is never blocked by cleanup.
+ *
+ * An older deployment without the route answers 404; that is treated as
+ * "not implemented yet" and stays silent. Override the path with
+ * `VITE_MEDIA_DELETE_PATH` if it is ever mounted elsewhere.
  */
 
 /** One year, immutable. Only safe because uploads are content-addressed. */
 export const MEDIA_CACHE_CONTROL = '31536000';
 
-/** Endpoint the backend should implement (idempotent, 404-tolerant). */
-const MEDIA_DELETE_PATH = '/api/media/delete';
+/**
+ * Route implemented by hamza-backend (`POST /api/media/delete`). Kept in
+ * relative form so it works same-origin through nginx/Vercel and in tests.
+ */
+const MEDIA_DELETE_PATH = import.meta.env?.VITE_MEDIA_DELETE_PATH || '/api/media/delete';
 
 /**
  * Add the fields a backend needs to write correct storage metadata.
@@ -124,7 +146,7 @@ export function isUrlStillReferenced(url, records = [], fields = ['image_url', '
  *
  * @param {string|string[]} urls
  * @param {{ apiBase: string, token?: string }} opts
- * @returns {Promise<{ deleted: string[], skipped: string[] }>}
+ * @returns {Promise<{ deleted: string[], skipped: string[], reasons?: Record<string,string> }>}
  */
 export async function deleteMedia(urls, { apiBase = '', token } = {}) {
   const list = (Array.isArray(urls) ? urls : [urls])
@@ -171,6 +193,7 @@ export async function deleteMedia(urls, { apiBase = '', token } = {}) {
     return {
       deleted: Array.isArray(json.deleted) ? json.deleted : unique,
       skipped: Array.isArray(json.skipped) ? json.skipped : [],
+      ...(json.reasons && typeof json.reasons === 'object' ? { reasons: json.reasons } : {}),
     };
   } catch (err) {
     console.warn('[media] orphan cleanup failed (ignored):', err?.message || err);

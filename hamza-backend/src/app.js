@@ -9,7 +9,8 @@ import { createMessageRepository } from './services/messageRepository.js';
 import { createConversationService } from './services/conversationService.js';
 import { createMediaIngestService } from './services/mediaIngestService.js';
 import { createMediaFetcher } from './services/mediaFetcher.js';
-import { createMediaRouter } from './routes/media.js';
+import { createMediaStorage } from './services/mediaStorage.js';
+import { createMediaLifecycleRouter, createMediaRouter } from './routes/media.js';
 import { createRefreshMediaRouter } from './routes/refreshMedia.js';
 import { createChatRouter } from './routes/chat.js';
 import { createWebhookRouter } from './routes/webhooks.js';
@@ -52,12 +53,14 @@ export function createApp({ env = loadEnv(), logger = createLogger({ level: proc
     cacheBytes: env.MEDIA_STREAM_CACHE_BYTES,
   });
   const ingest = createMediaIngestService({ messages, conversations, logger });
+  const mediaStorage = createMediaStorage({ client, env, logger });
 
   // Shared with routes that resolve media lazily.
   app.locals.graph = graph;
   app.locals.blobStore = blobStore;
   app.locals.mediaFetcher = mediaFetcher;
   app.locals.messages = messages;
+  app.locals.mediaStorage = mediaStorage;
 
   const requireAdmin = createAuthMiddleware({ client, logger });
   const metaVerify = metaSignatureMiddleware({ appSecret: env.META_APP_SECRET, logger });
@@ -69,6 +72,11 @@ export function createApp({ env = loadEnv(), logger = createLogger({ level: proc
 
   // Webhooks authenticate with X-Hub-Signature-256, not bearer tokens.
   app.use('/api/webhooks', createWebhookRouter({ env, logger, ingest, metaVerify }));
+
+  // Product/hero media life-cycle. The admin frontend has called this contract
+  // since the media audit; until now no backend route existed (404 was ignored
+  // by design). Admin-only because a delete is not an <img> operation.
+  app.use('/api/media', requireAdmin, createMediaLifecycleRouter({ env, logger, storage: mediaStorage }));
 
   app.use('/api/chat', requireAdmin);
   app.use('/api/chat', createChatRouter({ env, logger, client, messages }));
@@ -90,7 +98,7 @@ export function createApp({ env = loadEnv(), logger = createLogger({ level: proc
     });
   });
 
-  return { app, deps: { client, graph, blobStore, messages, mediaFetcher, ingest, env, logger } };
+  return { app, deps: { client, graph, blobStore, messages, mediaFetcher, mediaStorage, ingest, env, logger } };
 }
 
 export default createApp;

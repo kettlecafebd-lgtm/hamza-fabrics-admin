@@ -20,7 +20,7 @@ webhook  ->  chat_messages.media_url (a URL string)  ->  browser loads from Meta
 ```bash
 cp .env.example .env      # fill in Supabase + Meta credentials
 npm install
-npm test                  # 21 unit/integration tests
+npm test                  # 34 unit/integration tests
 node test/smoke-e2e.mjs   # 8 end-to-end checks against a mock Graph API
 npm start                 # listens on :5000
 ```
@@ -44,6 +44,8 @@ a half-configured media pipeline is worse than a stopped one.
 | GET | `/api/chat/conversations/:id/messages` | Bearer (admin) | thread with `media` metadata |
 | POST | `/api/chat/conversations/:id/messages` | Bearer (admin) | send text |
 | GET | `/api/chat/media-health` | Bearer (admin) | proves no bytes are being stored |
+| POST | `/api/media/delete` | Bearer (admin) | removes replaced/deleted product & hero objects (opt-in, reference-checked) |
+| POST | `/api/media/cache-control` | Bearer (admin) | re-stores objects with a one-year `Cache-Control` (backfill) |
 
 ## Design notes
 
@@ -61,6 +63,13 @@ a half-configured media pipeline is worse than a stopped one.
 - **SSRF guard.** Only `*.fbcdn.net`, `*.fbsbx.com`, `*.cdninstagram.com`,
   `*.facebook.com`, `*.whatsapp.net` over HTTPS are fetchable; private ranges are
   rejected.
+- **Product/hero media life-cycle.** `POST /api/media/delete` is the route the admin
+  frontend's `deleteMedia()` has always called. It only touches URLs on this
+  project's host, only inside `MEDIA_DELETE_BUCKETS`, and only when the
+  `media_references` view (migration 003) proves no row still points at the
+  object. It fails closed (everything lands in `skipped`) when the view is
+  missing, and stays inert until `MEDIA_DELETE_ENABLED=true`. `skipped` carries a
+  machine-readable `reasons[url]`, so a refusal is never an error.
 
 ## Migrations
 
@@ -73,3 +82,7 @@ psql "$SUPABASE_DB_URL" -c "vacuum full public.chat_media_blobs;"
 
 `migrations/002_media_storage_guard.sql` adds a view that should always return
 zero rows — if it ever doesn't, binary media is creeping back into Postgres.
+
+`migrations/003_media_references.sql` adds the `media_references` view used by
+`POST /api/media/delete` (plus the `media_storage_key()` normaliser). Run it,
+check the view lists your images, then set `MEDIA_DELETE_ENABLED=true`.

@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import toast from 'react-hot-toast';
 import API_BASE_URL from '../config/api';
 import { prepareImageForUpload } from '../lib/imageOptimize';
-import { appendStorageFields, deleteMedia } from '../lib/mediaClient';
+import { deleteMedia, uploadMedia } from '../lib/mediaClient';
 
 function decodeToken(token) {
   try {
@@ -57,17 +57,25 @@ export default function ProfileSettings({ onClose }) {
           return;
         }
 
-        const formData = new FormData();
-        formData.append('file', prepared);
-        appendStorageFields(formData, prepared);
         // Best effort: the JWT payload is all this component has.
         previousAvatar = user?.avatar_url || user?.picture || null;
-        if (previousAvatar) formData.append('previous_image_url', previousAvatar);
 
-        const uploadRes = await fetch(`${API_BASE_URL}/api/upload-image`, { method: 'POST', headers: { 'Authorization': `Bearer ${token}` }, body: formData });
-        const uploadData = await uploadRes.json();
-        if (uploadData.success) avatar_url = uploadData.url;
-        else { toast.error('Failed to upload avatar.'); setSaving(false); return; }
+        // Direct-to-R2: the bytes go browser -> Cloudflare R2, never through
+        // this backend and never into Supabase Storage.
+        const uploaded = await uploadMedia(prepared, {
+          apiBase: API_BASE_URL,
+          token,
+          kind: 'avatar',
+          fieldName: 'file',
+          previousUrl: previousAvatar,
+        });
+        if (uploaded.ok) {
+          avatar_url = uploaded.url;
+        } else {
+          toast.error(uploaded.reason === 'too-large' ? 'Avatar is too large.' : 'Failed to upload avatar.');
+          setSaving(false);
+          return;
+        }
       }
 
       const res = await fetch(`${API_BASE_URL}/api/auth/profile`, {

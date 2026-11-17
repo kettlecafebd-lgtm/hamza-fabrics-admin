@@ -4,9 +4,11 @@ const fallbackApiUrl = import.meta.env.DEV
   : globalThis.location?.origin || '';
 const apiUrl = configuredApiUrl || fallbackApiUrl;
 
-console.info(
-  `[app-config] API URL: ${apiUrl || '(empty)'} (${configuredApiUrl ? 'VITE_API_URL' : 'fallback'})`,
-);
+// Diagnostics only in dev: this ran on every production page load, which is
+// pure noise (and, behind a browser-log drain, pure log-ingestion cost).
+if (import.meta.env.DEV) {
+  console.debug(`[app-config] API URL: ${apiUrl || '(empty)'} (${configuredApiUrl ? 'VITE_API_URL' : 'fallback'})`);
+}
 
 export const appConfig = {
   apiUrl,

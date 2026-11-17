@@ -3,7 +3,7 @@ import { ThemeContext } from '../context/ThemeContext';
 import API_BASE_URL from '../config/api';
 import toast from 'react-hot-toast';
 import { prepareImageForUpload, describeSaving } from '../lib/imageOptimize';
-import { appendStorageFields, deleteMedia } from '../lib/mediaClient';
+import { deleteMedia, uploadMedia } from '../lib/mediaClient';
 import { cachedFetch, invalidateCache, CACHE_TTLS } from '../lib/dataCache';
 
 export default function Settings() {
@@ -161,10 +161,6 @@ export default function Settings() {
       return;
     }
 
-    const formData = new FormData();
-    formData.append('image', prepared);
-    appendStorageFields(formData, prepared);
-
     // Remember what this slot pointed at so the old object can be cleaned up.
     const previousUrl = fieldName === 'heroImages' ? settings.heroImages?.[index]
       : fieldName === 'heroMobileImages' ? settings.heroMobileImages?.[index]
@@ -172,28 +168,29 @@ export default function Settings() {
       : fieldName === 'logoUrl' ? settings.logoUrl
       : fieldName === 'faviconUrl' ? settings.faviconUrl
       : null;
-    if (previousUrl) formData.append('previous_image_url', previousUrl);
 
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/upload-image`, { 
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('adminToken')}` },
-        body: formData
-      });
-      const data = await response.json();
-      if(data.success) {
-        updateField(fieldName, data.url, index);
-        if (saving) toast.success(`Optimised: ${saving}`, { duration: 2500 });
-        // Uploading only edits local state — nothing is published until Save.
-        // Queue the replaced object; handleSave() releases it after a real commit.
-        if (previousUrl && previousUrl !== data.url) {
-          pendingMediaDeletes.current.push(previousUrl);
-        }
-      } else {
-        toast.error('Upload failed: ' + data.message);
+    // Direct-to-R2: one presign call, then the bytes go browser -> Cloudflare
+    // R2. Nothing is proxied through the backend and nothing enters Supabase
+    // Storage, so a 2 MB hero banner costs us 2 MB of ingress and no Supabase
+    // egress on every later page load.
+    const uploaded = await uploadMedia(prepared, {
+      apiBase: API_BASE_URL,
+      token: localStorage.getItem('adminToken'),
+      kind: 'settings',
+      fieldName: 'image',
+      previousUrl,
+    });
+
+    if (uploaded.ok) {
+      updateField(fieldName, uploaded.url, index);
+      if (saving) toast.success(`Optimised: ${saving}`, { duration: 2500 });
+      // Uploading only edits local state — nothing is published until Save.
+      // Queue the replaced object; handleSave() releases it after a real commit.
+      if (previousUrl && previousUrl !== uploaded.url) {
+        pendingMediaDeletes.current.push(previousUrl);
       }
-    } catch (err) { 
-      toast.error('Upload failed! Server connection issue.'); 
+    } else {
+      toast.error(uploaded.reason === 'too-large' ? 'That image is too large.' : 'Upload failed. Please retry.');
     }
   };
 

@@ -5,7 +5,7 @@ import { AlertTriangle, Upload, CheckCircle, Shield } from 'lucide-react';
 import API_BASE_URL from '../config/api';
 import { ThemeContext } from '../context/ThemeContext';
 import { prepareImageForUpload, MAX_SOURCE_BYTES } from '../lib/imageOptimize';
-import { appendStorageFields } from '../lib/mediaClient';
+import { uploadMedia } from '../lib/mediaClient';
 
 const ISSUE_TYPES = [
   { value: 'wrong-color', label: 'Received wrong color or design' },
@@ -80,10 +80,13 @@ export default function ResolutionCenter() {
 
       // Cap at 1200 px / WebP q0.80 — these are evidence photos read on a phone,
       // not print assets, and the customer is usually on mobile data.
-      // Cache fields are constant for the whole request, so declare them once —
-      // repeating them per file would give the backend several values to pick from.
-      appendStorageFields(form, null);
-
+      //
+      // Each photo goes straight to Cloudflare R2 and the claim carries only the
+      // resulting URLs. The old shape attached every file to this request, so a
+      // 3-photo claim pushed ~10 MB through the backend and into Supabase
+      // Storage; on a customer's mobile connection that was also the slowest
+      // part of submitting.
+      const evidenceUrls = [];
       for (const f of files) {
         let prepared = f;
         try {
@@ -94,8 +97,23 @@ export default function ResolutionCenter() {
           setIsSubmitting(false);
           return;
         }
-        form.append('images', prepared);
+
+        const uploaded = await uploadMedia(prepared, {
+          apiBase: API_BASE_URL,
+          token: customerData.token,
+          kind: 'resolution',
+          fieldName: 'file',
+        });
+        if (!uploaded.ok) {
+          toast.error(uploaded.reason === 'too-large' ? `${f.name} is too large.` : `Could not upload ${f.name}. Please retry.`);
+          setIsSubmitting(false);
+          return;
+        }
+        evidenceUrls.push(uploaded.url);
       }
+
+      // URLs as JSON: no multipart, no binary body.
+      form.append('image_urls', JSON.stringify(evidenceUrls));
 
       const res = await fetch(`${API_BASE_URL}/api/resolution/create`, {
         method: 'POST',

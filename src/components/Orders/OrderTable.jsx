@@ -80,7 +80,7 @@ export default function OrderTable({
            await fetch(`${API_BASE_URL}/api/customers/${phone}/metrics`, {
              method: 'PUT', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify({ metrics: newMetrics })
            });
-         } catch(saveErr) { console.log("Auto-save failed", saveErr); }
+         } catch(saveErr) { console.warn("[orders] inline auto-save failed:", saveErr?.message || saveErr); }
       } else { 
          setLiveMetrics(prev => ({ ...prev, [orderId]: { total_orders: 0, success_rate: 0 } }));
          toast.error("No data found in couriers!"); 

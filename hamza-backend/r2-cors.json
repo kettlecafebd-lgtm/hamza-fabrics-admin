@@ -1,0 +1,17 @@
+{
+  "_comment": "CORS policy for the hamza-media R2 bucket. Required for presigned browser uploads (MEDIA_DIRECT_UPLOAD_ENABLED=true). Apply with: npx wrangler r2 bucket cors put hamza-media --file hamza-backend/r2-cors.json   (or paste into the Cloudflare dashboard: R2 > hamza-media > Settings > CORS Policy). Origin must be the ADMIN app origin, not the API. Keep AllowedHeaders in sync with src/lib/mediaClient.js uploadMedia() -- the preflight will fail if Cache-Control is missing, and the PUT is rejected unless it carries the signed Cache-Control header.",
+  "rules": [
+    {
+      "_comment": "Admin app: uploads and thumbnail reads.",
+      "AllowedOrigins": [
+        "https://admin.hamzafabrics.com",
+        "https://hamza-fabrics-admin.vercel.app",
+        "http://localhost:5173"
+      ],
+      "AllowedMethods": ["GET", "HEAD", "PUT"],
+      "AllowedHeaders": ["Content-Type", "Cache-Control", "Content-Length", "If-None-Match"],
+      "ExposeHeaders": ["ETag", "Content-Length", "Cache-Control"],
+      "MaxAgeSeconds": 3600
+    }
+  ]
+}

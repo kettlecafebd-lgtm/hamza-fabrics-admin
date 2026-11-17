@@ -5,7 +5,7 @@ import VariantMatrix from '../components/ui/VariantMatrix';
 import { GlassModal } from '../components/ui/GlassCard';
 import { getToken } from '../utils/auth';
 import { prepareImageForUpload, describeSaving } from '../lib/imageOptimize';
-import { appendStorageFields, deleteMedia, isUrlStillReferenced } from '../lib/mediaClient';
+import { deleteMedia, isUrlStillReferenced, uploadMedia } from '../lib/mediaClient';
 import { cachedFetch, invalidateCache, CACHE_TTLS } from '../lib/dataCache';
 
 /** Rows per page. A paging-aware backend honours this; a legacy one returns all. */
@@ -334,17 +334,36 @@ export default function Products() {
     // can legitimately share one file; replacing one must not delete the other.
     const keptSideImages = [];
 
+    // The main image is sent to Cloudflare R2 BEFORE the product row is
+    // submitted, so the request that follows carries only a URL. Previously the
+    // file rode along in the product multipart, which meant every save pushed
+    // megabytes through the backend and into Supabase Storage.
     if (baseImage) {
+        let prepared;
         try {
-            const { file: prepared, originalBytes, bytes, changed } = await prepareImageForUpload(baseImage, 'product');
-            submissionData.append('image', prepared);
-            appendStorageFields(submissionData, prepared);
-            if (changed) console.info('[products] main image', describeSaving(originalBytes, bytes));
+            const result = await prepareImageForUpload(baseImage, 'product');
+            prepared = result.file;
+            if (result.changed) console.debug('[products] main image', describeSaving(result.originalBytes, result.bytes));
         } catch (err) {
             showToast(err.message || 'Main image is too large.', 'error');
             setIsSubmitting(false);
             return;
         }
+
+        const uploaded = await uploadMedia(prepared, {
+            apiBase: API_BASE_URL,
+            token: getToken(),
+            kind: 'product',
+            fieldName: 'image',
+            previousUrl: previousMainImage,
+        });
+        if (!uploaded.ok) {
+            showToast(uploaded.reason === 'too-large' ? 'Main image is too large.' : 'Image upload failed. Please retry.', 'error');
+            setIsSubmitting(false);
+            return;
+        }
+        newMainImageUrl = uploaded.url;
+        submissionData.append('image_url', uploaded.url);
         if (previousMainImage) submissionData.append('previous_image_url', previousMainImage);
     } else if (editingId) {
         submissionData.append('image_url', previousMainImage || '');
@@ -394,12 +413,13 @@ export default function Products() {
         });
     });
 
-    // 4. Submit Variants JSON & Match Image Indexes Properly
+    // 4. Upload variant photos straight to R2, THEN submit the variant JSON.
+    // The JSON must be built after the URLs are known — serialising it first
+    // would ship an empty image_url and orphan the uploaded object.
     if (allVariantsToSubmit.length > 0) {
         submissionData.append('hasVariants', 'true');
-        submissionData.append('variantsData', JSON.stringify(allVariantsToSubmit));
 
-        // 🟢 FIX: Calculate exactly where extra variants start in the JSON array
+        // Calculate exactly where extra variants start in the JSON array
         const extraVariantOffset = (baseProd.hasSizes && baseProd.sizes.length > 0) ? 1 : 0;
 
         for (const [index, v] of extraVariants.entries()) {
@@ -408,21 +428,41 @@ export default function Products() {
                 continue;
             }
             const correctIndex = extraVariantOffset + index;
+            let prepared;
             try {
-                const { file: prepared } = await prepareImageForUpload(v.imageFile, 'variant');
-                // এখন variantImage_1, variantImage_2 ব্যাকএন্ডের লুপের সাথে ঠিক মিলবে
-                submissionData.append(`variantImage_${correctIndex}`, prepared);
-                submissionData.append(`variantImageContentType_${correctIndex}`, prepared.type || 'image/webp');
-                if (v.existing_image_url) {
-                    submissionData.append(`variantImagePrevious_${correctIndex}`, v.existing_image_url);
-                    replacedSideImages.push(v.existing_image_url);
-                }
+                prepared = (await prepareImageForUpload(v.imageFile, 'variant')).file;
             } catch (err) {
                 showToast(err.message || `Variant image for ${v.color || 'variant'} is too large.`, 'error');
                 setIsSubmitting(false);
                 return;
             }
+
+            // Direct-to-R2: the variant JSON carries the resulting URL, so the
+            // product request stays small.
+            const uploaded = await uploadMedia(prepared, {
+                apiBase: API_BASE_URL,
+                token: getToken(),
+                kind: 'variant',
+                fieldName: 'image',
+                previousUrl: v.existing_image_url || null,
+            });
+            if (!uploaded.ok) {
+                showToast(`Variant image for ${v.color || 'variant'} could not be uploaded.`, 'error');
+                setIsSubmitting(false);
+                return;
+            }
+            // `correctIndex` mirrors the server's expectation for which variant
+            // the URL belongs to; allVariantsToSubmit is index-aligned with it.
+            if (allVariantsToSubmit[correctIndex]) {
+                allVariantsToSubmit[correctIndex].image_url = uploaded.url;
+            }
+            if (v.existing_image_url) {
+                submissionData.append(`variantImagePrevious_${correctIndex}`, v.existing_image_url);
+                replacedSideImages.push(v.existing_image_url);
+            }
         }
+
+        submissionData.append('variantsData', JSON.stringify(allVariantsToSubmit));
     } else {
         submissionData.append('hasVariants', 'false');
     }
@@ -430,26 +470,42 @@ export default function Products() {
     // 5. Reviews Array & Images
     const reviewsToSubmit = reviews.map(r => ({ name: r.name, comment: r.comment, existing_image: r.existing_image || null }));
     if(reviewsToSubmit.length > 0) {
-        submissionData.append('reviewsData', JSON.stringify(reviewsToSubmit));
         for (const [index, r] of reviews.entries()) {
             if (!r.imageFile) {
                 if (r.existing_image) keptSideImages.push(r.existing_image);
                 continue;
             }
+            let prepared;
             try {
-                const { file: prepared } = await prepareImageForUpload(r.imageFile, 'review');
-                submissionData.append(`reviewImage_${index}`, prepared);
-                submissionData.append(`reviewImageContentType_${index}`, prepared.type || 'image/webp');
-                if (r.existing_image) {
-                    submissionData.append(`reviewImagePrevious_${index}`, r.existing_image);
-                    replacedSideImages.push(r.existing_image);
-                }
+                prepared = (await prepareImageForUpload(r.imageFile, 'review')).file;
             } catch (err) {
                 showToast(err.message || 'A review image is too large.', 'error');
                 setIsSubmitting(false);
                 return;
             }
+
+            const uploaded = await uploadMedia(prepared, {
+                apiBase: API_BASE_URL,
+                token: getToken(),
+                kind: 'review',
+                fieldName: 'image',
+                previousUrl: r.existing_image || null,
+            });
+            if (!uploaded.ok) {
+                showToast('A review image could not be uploaded.', 'error');
+                setIsSubmitting(false);
+                return;
+            }
+            // Reviews travel as JSON, so the URL replaces the file part.
+            reviewsToSubmit[index].existing_image = uploaded.url;
+            if (r.existing_image) {
+                submissionData.append(`reviewImagePrevious_${index}`, r.existing_image);
+                replacedSideImages.push(r.existing_image);
+            }
         }
+
+        // Serialised last, so every entry carries its R2 URL.
+        submissionData.append('reviewsData', JSON.stringify(reviewsToSubmit));
     }
 
     const url = editingId ? `${API_BASE_URL}/api/products/${editingId}` : `${API_BASE_URL}/api/products`;
@@ -462,7 +518,9 @@ export default function Products() {
       });
       const result = await response.json();
       if (result.success) {
-          newMainImageUrl = result.image_url || result.data?.image_url || null;
+          // Keep the URL we just uploaded; a legacy response shape may omit it
+          // and would otherwise clear the field.
+          newMainImageUrl = newMainImageUrl || result.image_url || result.data?.image_url || null;
 
           // Only after the DB committed, only when the server confirmed a new URL,
           // and only if nothing else still uses the old one.

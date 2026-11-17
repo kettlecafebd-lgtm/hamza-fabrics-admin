@@ -1,8 +1,11 @@
 # hamza-backend
 
 Chat backend for the Hamza Fabrics admin inbox. Chat attachments are stored as
-**CDN URLs, never as bytes**. See [`docs/AUDIT.md`](docs/AUDIT.md) for the full
-audit that motivated this design (106 MB TOAST, 36 GB+ egress).
+**CDN URLs, never as bytes**, and product/hero/avatar media lives in
+**Cloudflare R2** — not Supabase Storage. See [`docs/AUDIT.md`](docs/AUDIT.md)
+for the chat-media audit (106 MB TOAST, 36 GB+ egress) and
+[`../R2_MIGRATION_AUDIT.md`](../R2_MIGRATION_AUDIT.md) for the Supabase → R2
+migration (media egress + log ingestion).
 
 ## Why this exists
 
@@ -44,8 +47,36 @@ a half-configured media pipeline is worse than a stopped one.
 | GET | `/api/chat/conversations/:id/messages` | Bearer (admin) | thread with `media` metadata |
 | POST | `/api/chat/conversations/:id/messages` | Bearer (admin) | send text |
 | GET | `/api/chat/media-health` | Bearer (admin) | proves no bytes are being stored |
-| POST | `/api/media/delete` | Bearer (admin) | removes replaced/deleted product & hero objects (opt-in, reference-checked) |
-| POST | `/api/media/cache-control` | Bearer (admin) | re-stores objects with a one-year `Cache-Control` (backfill) |
+| POST | `/api/media/presign` | Bearer (admin) | presigned direct-to-R2 upload URL (browser PUTs the file; 0 bytes via us) |
+| POST | `/api/media/delete` | Bearer (admin) | removes replaced/deleted objects in ONE batched R2 request (opt-in, reference-checked) |
+| POST | `/api/media/cache-control` | Bearer (admin) | server-side `CopyObject` backfill to a one-year `Cache-Control` (no payload egress) |
+| GET | `/api/media/config` | Bearer (admin) | which driver is live + whether direct upload is on |
+| POST | `/api/upload-image` | Bearer (admin) | legacy multipart shape, writes to R2 (fallback when CORS is pending) |
+
+## Media storage
+
+`MEDIA_STORAGE_DRIVER` selects the driver. **R2 is the default** as soon as
+`R2_BUCKET` + credentials + `R2_ACCOUNT_ID`/`R2_ENDPOINT` are set; Supabase
+Storage is only reachable by asking for it by name (`MEDIA_STORAGE_DRIVER=supabase`)
+so an operator can drain an existing bucket. In that mode it can delete but not
+write — new bytes always go to R2.
+
+```
+browser --POST /api/media/presign--> { uploadUrl, headers, url }
+        --PUT file + headers-------> R2        (0 bytes through this service)
+        --GET url-------------------> R2       (0 bytes through this service)
+```
+
+Presigned uploads need a bucket CORS policy: `npx wrangler r2 bucket cors put
+hamza-media --file r2-cors.json`. Without it, presign answers 503 and the frontend
+falls back to `/api/upload-image` (still R2, just proxied once).
+
+## Logging
+
+Supabase bills log ingestion per line, so per-message and per-request chatter is
+`debug` (dropped by `LOG_LEVEL=info`). `LOG_MEDIA_EVENTS=true` and
+`LOG_HTTP_REQUESTS=true` turn it back on for debugging; `LOG_LEVEL=debug` is
+refused in production and clamped to `info`.
 
 ## WhatsApp replies from the admin inbox
 

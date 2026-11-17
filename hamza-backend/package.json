@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Hamza Fabrics backend — chat media stored as CDN URLs, never as blobs",
+  "description": "Hamza Fabrics backend — media stored as Cloudflare R2 URLs, never as blobs or Supabase Storage objects",
   "main": "src/server.js",
   "engines": {
     "node": ">=20"
@@ -14,6 +14,8 @@
     "test": "node --test test/*.test.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1171.0",
+    "@aws-sdk/s3-request-presigner": "^3.1171.0",
     "@supabase/supabase-js": "^2.45.4",
     "express": "^4.21.2"
   }

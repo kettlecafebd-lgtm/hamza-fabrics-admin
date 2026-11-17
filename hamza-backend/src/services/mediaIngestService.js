@@ -16,7 +16,20 @@ import {
  * `deliveryStatus` answers Meta's retries with 200 even when a single message
  * cannot be stored, so Meta does not replay the whole batch for 7 days.
  */
-export function createMediaIngestService({ messages, conversations, logger }) {
+export function createMediaIngestService({ messages, conversations, logger, env = {} } = {}) {
+  /**
+   * Per-message logging is a billing decision, not a debugging one: Supabase
+   * charges per ingested line and a busy inbox produces thousands of these a
+   * day. Default `debug` (dropped at LOG_LEVEL=info); `LOG_MEDIA_EVENTS=true`
+   * promotes them when someone is actually watching the pipeline.
+   */
+  const flag = env.LOG_MEDIA_EVENTS;
+  const mediaEventsAtInfo = flag === true || flag === 'true';
+  const logEvent = (message, fields) => {
+    if (mediaEventsAtInfo) logger?.info(message, fields);
+    else logger?.debug(message, fields);
+  };
+
   async function handleMessengerMessage({ pageId, event }) {
     const message = event?.message;
     if (!message || message.is_echo) return { handled: false, reason: 'not_inbound' };
@@ -53,10 +66,9 @@ export function createMediaIngestService({ messages, conversations, logger }) {
       at: row.created_at,
     });
 
-    logger?.info(`stored messenger message ${platformMessageId}`, {
+    logEvent(`stored messenger message ${platformMessageId}`, {
       media: attachment ? attachment.kind : 'none',
       storedUrl: Boolean(attachment?.url),
-      blobBytesWritten: 0,
     });
 
     return { handled: true, conversationId: conversation.id, message: saved, attachment };
@@ -97,11 +109,10 @@ export function createMediaIngestService({ messages, conversations, logger }) {
       at: row.created_at,
     });
 
-    logger?.info(`stored whatsapp message ${platformMessageId}`, {
+    logEvent(`stored whatsapp message ${platformMessageId}`, {
       media: attachment ? attachment.kind : 'none',
       // WhatsApp gives a media id, not a URL; it is resolved on read.
       mediaId: attachment?.mediaId || null,
-      blobBytesWritten: 0,
     });
 
     return { handled: true, conversationId: conversation.id, message: saved, attachment };

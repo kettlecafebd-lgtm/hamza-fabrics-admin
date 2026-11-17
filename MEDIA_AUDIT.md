@@ -1,5 +1,12 @@
 # Media & Cloud Storage Audit
 
+> **Update (2026-11-17):** Supabase Storage has been replaced by **Cloudflare R2**.
+> See [`R2_MIGRATION_AUDIT.md`](R2_MIGRATION_AUDIT.md) for the files changed, the new
+> presigned-upload flow, and the log-ingestion cleanup. Sections below that describe
+> `supabase.storage.from(...)` writes are historical: no code path writes new media to
+> Supabase Storage any more, and `POST /api/media/cache-control` no longer moves object
+> bytes (it is a server-side `CopyObject` on R2).
+
 **Repo:** `hamza-fabrics-admin` (Vite + React 19 SPA, ~19k LOC)
 **Scope:** upload pipeline, orphaned objects, caching/delivery
 **Date:** 2026-11-12

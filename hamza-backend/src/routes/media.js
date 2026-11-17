@@ -204,6 +204,7 @@ export function createMediaLifecycleRouter({ env = {}, logger, storage }) {
   const maxDeleteUrls = Number(env.MEDIA_DELETE_MAX_URLS) || 50;
   const maxCacheUrls = Number(env.MEDIA_CACHE_CONTROL_MAX_URLS) || 10;
   const cacheSeconds = resolveCacheControlSeconds(env.MEDIA_UPLOAD_CACHE_CONTROL_SECONDS);
+  const driver = storage.driver || 'unknown';
 
   router.post('/delete', asyncHandler(async (req, res) => {
     const urls = readMediaUrls(req.body?.urls, maxDeleteUrls);
@@ -216,8 +217,9 @@ export function createMediaLifecycleRouter({ env = {}, logger, storage }) {
         skipped.push(url);
         reasons[url] = 'disabled';
       }
-      logger?.info(`media delete: disabled (${urls.length} URL(s) ignored)`);
-      return res.json({ success: true, deleted, skipped, reasons, disabled: true });
+      // Deliberately debug: this fires on every product save while disabled.
+      logger?.debug(`media delete: disabled (${urls.length} URL(s) ignored)`);
+      return res.json({ success: true, deleted, skipped, reasons, disabled: true, driver });
     }
 
     // Parse first, then verify the whole batch with one reference query.
@@ -234,6 +236,7 @@ export function createMediaLifecycleRouter({ env = {}, logger, storage }) {
 
     const references = await storage.referencedKeys(candidates.map((c) => c.storageKey));
 
+    const removable = [];
     for (const candidate of candidates) {
       if (!references.ok) {
         skipped.push(candidate.url);
@@ -246,25 +249,61 @@ export function createMediaLifecycleRouter({ env = {}, logger, storage }) {
         reasons[candidate.url] = 'referenced';
         continue;
       }
+      removable.push(candidate);
+    }
 
-      const result = await storage.removeObject(candidate);
-      if (result.ok) {
-        deleted.push(candidate.url);
+    if (removable.length > 0) {
+      // R2 can drop the whole batch in ONE request; the Supabase legacy driver
+      // has no such API, so it falls back to one call per object.
+      if (typeof storage.removeObjects === 'function') {
+        const batch = await storage.removeObjects(removable.map((c) => c.key));
+        if (batch.ok) {
+          const failedKeys = new Set(batch.failed || []);
+          for (const candidate of removable) {
+            if (batch.removed?.includes(candidate.key) && !failedKeys.has(candidate.key)) {
+              deleted.push(candidate.url);
+            } else {
+              skipped.push(candidate.url);
+              reasons[candidate.url] = 'storage-error';
+            }
+          }
+        } else {
+          for (const candidate of removable) {
+            skipped.push(candidate.url);
+            reasons[candidate.url] = batch.reason || 'storage-error';
+          }
+        }
       } else {
-        skipped.push(candidate.url);
-        reasons[candidate.url] = result.reason || 'storage-error';
+        for (const candidate of removable) {
+          const result = await storage.removeObject(candidate);
+          if (result.ok) {
+            deleted.push(candidate.url);
+          } else {
+            skipped.push(candidate.url);
+            reasons[candidate.url] = result.reason || 'storage-error';
+          }
+        }
       }
     }
 
     if (urls.length) {
-      logger?.info(`media delete: ${deleted.length} removed, ${skipped.length} skipped`);
+      logger?.debug(`media delete: ${deleted.length} removed, ${skipped.length} skipped (${driver})`);
     }
-    return res.json({ success: true, deleted, skipped, reasons });
+    return res.json({ success: true, deleted, skipped, reasons, driver });
   }));
 
+  /**
+   * POST /api/media/cache-control  { urls: string[], cacheControl?: string }
+   *
+   * Backfill for objects written before `Cache-Control: immutable` was set.
+   *
+   * On R2 this is HeadObject + CopyObject, i.e. metadata only: the object's
+   * bytes are never sent to or from this process. That is the whole reason the
+   * Supabase version had to go -- it downloaded and re-uploaded every image.
+   */
   router.post('/cache-control', asyncHandler(async (req, res) => {
     const urls = readMediaUrls(req.body?.urls, maxCacheUrls);
-    const seconds = cacheSeconds;
+    const seconds = resolveCacheControlSeconds(req.body?.cacheControl) || cacheSeconds;
     const updated = [];
     const skipped = [];
     const reasons = {};
@@ -285,9 +324,34 @@ export function createMediaLifecycleRouter({ env = {}, logger, storage }) {
       }
     }
 
-    if (urls.length) logger?.info(`media cache-control: ${updated.length} updated, ${skipped.length} skipped`);
-    return res.json({ success: true, updated, skipped, reasons, cacheControl: `max-age=${seconds}` });
+    if (urls.length) logger?.debug(`media cache-control: ${updated.length} updated, ${skipped.length} skipped (${driver})`);
+    return res.json({
+      success: true,
+      updated,
+      skipped,
+      reasons,
+      cacheControl: `max-age=${seconds}`,
+      driver,
+    });
   }));
+
+  /**
+   * GET /api/media/config
+   *
+   * Which driver is live, and what the frontend should do about it. Lets the
+   * admin verify the migration from the UI instead of reading logs.
+   */
+  router.get('/config', (_req, res) => {
+    res.json({
+      success: true,
+      driver,
+      directUpload: Boolean(env.MEDIA_DIRECT_UPLOAD_ENABLED),
+      deleteEnabled,
+      publicBase: storage.publicBase || null,
+      maxUploadBytes: storage.maxUploadBytes || null,
+      presignPath: '/api/media/presign',
+    });
+  });
 
   return router;
 }

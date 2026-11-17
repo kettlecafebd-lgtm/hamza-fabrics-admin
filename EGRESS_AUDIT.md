@@ -1,5 +1,9 @@
 # Supabase Egress Audit — `hamza-fabrics-admin`
 
+> **Update (2026-11-17):** media egress now leaves from **Cloudflare R2**, not Supabase.
+> See [`R2_MIGRATION_AUDIT.md`](R2_MIGRATION_AUDIT.md). The Supabase Storage SDK is no
+> longer on the upload or delivery path.
+
 **Date:** 2026-11-12
 **Scope:** entire `src/` tree (~19,000 LOC / 75 JSX components & pages), build config, nginx, deployment config
 **Symptom under investigation:** Supabase Egress **36.5 GB** (730 % of plan), Cached Egress **0.33 GB** → **~99.1 % of bytes leave the origin uncached**

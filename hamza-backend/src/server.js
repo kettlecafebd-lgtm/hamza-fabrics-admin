@@ -6,8 +6,24 @@ export function start() {
   const { app, deps } = createApp();
   const port = Number(process.env.PORT) || deps.env.PORT;
   server = app.listen(port, '0.0.0.0', () => {
-    deps.logger.info(`hamza-backend listening on :${port} — chat media mode: url-only`);
-    deps.logger.info(`legacy blob writes: ${deps.env.ENABLE_LEGACY_BLOB_WRITES ? 'ENABLED (deprecated!)' : 'disabled'}`);
+    // Two boot lines, not one per request: this is the shape of the log volume
+    // we want in Supabase (rare, high-signal).
+    deps.logger.info(
+      `hamza-backend listening on :${port} — media driver: ${deps.mediaStorage.driver}` +
+        ` (direct upload ${deps.env.MEDIA_DIRECT_UPLOAD_ENABLED ? 'on' : 'off'})`,
+    );
+    if (deps.env.ENABLE_LEGACY_BLOB_WRITES) {
+      deps.logger.warn('legacy blob writes are ENABLED (deprecated: reintroduces Postgres egress)');
+    }
+    for (const warning of deps.env.MEDIA_STORAGE_WARNINGS || []) {
+      deps.logger.warn(`media storage: ${warning}`);
+    }
+    if (deps.mediaStorage.driver === 'supabase') {
+      deps.logger.warn(
+        'Supabase Storage is still the active media driver — this is the source of the storage egress ' +
+          'and log-ingestion charges. Configure R2_* and remove MEDIA_STORAGE_DRIVER=supabase.',
+      );
+    }
   });
   return { server, deps };
 }

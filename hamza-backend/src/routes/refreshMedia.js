@@ -87,7 +87,10 @@ export function createRefreshMediaRouter({ env, logger, messages, graph }) {
       kind: best.kind,
     });
 
-    logger?.info(`refreshed media for message ${messageId}`, {
+    // An expired-URL refresh happens in bursts (a thread re-rendering after a
+    // CDN link dies). One `info` per refresh is pure log-ingestion cost, so it
+    // is debug-level; failures above stay at warn.
+    logger?.debug(`refreshed media for message ${messageId}`, {
       platform,
       persisted,
       // Never log the URL itself: it carries a signed token.

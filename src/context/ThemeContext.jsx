@@ -55,7 +55,7 @@ export const ThemeProvider = ({ children }) => {
           setShopTheme(data.data.shop_theme);
         }
       })
-      .catch(err => console.error("Failed to load theme from DB:", err));
+      .catch(err => console.error("[theme] failed to load from DB:", err));
     return () => { cancelled = true; };
   }, []);
 

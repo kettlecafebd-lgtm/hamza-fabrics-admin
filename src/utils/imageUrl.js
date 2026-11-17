@@ -11,27 +11,56 @@
  *
  * WHAT IT DOES
  * ------------
- * If an image is served from Supabase Storage's public object endpoint, swap it
- * for the Image Transformation endpoint and ask for a small render:
+ * Two transformation back-ends, in priority order:
  *
- *   /storage/v1/object/public/products/a.jpg
- *   -> /storage/v1/render/image/public/products/a.jpg?width=96&quality=70
+ *  1. **Cloudflare in front of R2** (`VITE_CDN_IMAGE_TRANSFORMS=true`). The
+ *     bucket is served from `R2_PUBLIC_BASE_URL`, so a thumbnail is one path
+ *     prefix away and is transformed at the edge — R2 never pays for the
+ *     full-size original on a 40 px slot:
+ *
+ *       https://media.example.com/products/a.webp
+ *       -> https://media.example.com/cdn-cgi/image/width=96,quality=70,format=auto/products/a.webp
+ *
+ *  2. **Supabase Storage transforms** (LEGACY, `VITE_SUPABASE_IMAGE_TRANSFORMS=true`).
+ *     Only relevant while old objects are still served from
+ *     `<project>.supabase.co`; every request through it is Supabase egress and
+ *     a logged Storage request, which is exactly what moving to R2 removes.
  *
  * Anything else (Unsplash, a relative backend path such as /uploads/a.jpg, or a
  * data: URI) is returned untouched.
  *
  * SAFETY
  * ------
- * Supabase Image Transformations are a project-level setting (Supabase Pro+).
- * If they are disabled the render endpoint 404s, so the swap is gated behind
- * VITE_SUPABASE_IMAGE_TRANSFORMS=true. While the flag is unset, every helper
- * here is a no-op and rendering is byte-for-byte identical to today.
+ * Both swaps are opt-in flags. While they are unset every helper here is a
+ * no-op and rendering is byte-for-byte identical to the raw URL, so a bucket
+ * without a transform rule can never break a page.
  */
 
 const PUBLIC_OBJECT_SEGMENT = '/storage/v1/object/public/';
 const RENDER_SEGMENT = '/storage/v1/render/image/public/';
 
-const transformsEnabled = import.meta.env.VITE_SUPABASE_IMAGE_TRANSFORMS === 'true';
+/** Feature flags. Read once at module load; neither can break a page when off. */
+const supabaseTransformsEnabled = import.meta.env?.VITE_SUPABASE_IMAGE_TRANSFORMS === 'true';
+const cdnTransformsEnabled = import.meta.env?.VITE_CDN_IMAGE_TRANSFORMS === 'true';
+
+/** Public base of the R2 bucket (custom domain or r2.dev), without a slash. */
+const CDN_BASE = String(import.meta.env?.VITE_MEDIA_PUBLIC_BASE_URL || '').replace(/\/+$/, '');
+
+/** True when the URL is served from our own R2 public base. */
+export function isOwnCdnUrl(url) {
+  if (!url || typeof url !== 'string' || !CDN_BASE) return false;
+  return url.startsWith(`${CDN_BASE}/`) && !url.includes('/cdn-cgi/image/');
+}
+
+/** Build a Cloudflare image-resizing URL for an object on our own base. */
+function cdnImage(url, width, quality) {
+  if (!isOwnCdnUrl(url)) return null;
+  const rest = url.slice(CDN_BASE.length);
+  return `${CDN_BASE}/cdn-cgi/image/width=${width},quality=${quality},format=auto${rest}`;
+}
+
+/** Applied when either back-end is available. */
+const transformsEnabled = supabaseTransformsEnabled || cdnTransformsEnabled;
 
 /**
  * Return a downscaled variant of `url` suitable for inline thumbnails.
@@ -43,8 +72,15 @@ const transformsEnabled = import.meta.env.VITE_SUPABASE_IMAGE_TRANSFORMS === 'tr
  */
 export function thumbUrl(url, width = 96, quality = 70) {
   if (!url || typeof url !== 'string' || !transformsEnabled) return url;
-  if (!url.includes(PUBLIC_OBJECT_SEGMENT)) return url;
 
+  // R2 + Cloudflare (the target state): transformed at the edge, zero Supabase.
+  if (cdnTransformsEnabled) {
+    const viaCdn = cdnImage(url, width, quality);
+    if (viaCdn) return viaCdn;
+  }
+
+  // Legacy Supabase Storage transforms (objects not yet migrated to R2).
+  if (!supabaseTransformsEnabled || !url.includes(PUBLIC_OBJECT_SEGMENT)) return url;
   const rendered = url.replace(PUBLIC_OBJECT_SEGMENT, RENDER_SEGMENT);
   const separator = rendered.includes('?') ? '&' : '?';
   return `${rendered}${separator}width=${width}&quality=${quality}&resize=cover`;
@@ -52,6 +88,13 @@ export function thumbUrl(url, width = 96, quality = 70) {
 
 /** True when image transformations are switched on for this build. */
 export const imageTransformsEnabled = transformsEnabled;
+
+/** Which back-end will be used, for diagnostics in Settings/health views. */
+export const imageTransformBackend = cdnTransformsEnabled
+  ? 'cloudflare-r2'
+  : supabaseTransformsEnabled
+    ? 'supabase-storage'
+    : 'none';
 
 /**
  * Build a responsive `srcSet` for a thumbnail.
@@ -67,8 +110,14 @@ export const imageTransformsEnabled = transformsEnabled;
  */
 export function srcSet(url, widths = [96, 192, 288], { quality = 70 } = {}) {
   if (!url || !transformsEnabled) return undefined;
-  if (!url.includes(PUBLIC_OBJECT_SEGMENT)) return undefined;
 
+  if (cdnTransformsEnabled && isOwnCdnUrl(url)) {
+    return widths
+      .map((w) => `${cdnImage(url, w, quality)} ${w}w`)
+      .join(', ');
+  }
+
+  if (!supabaseTransformsEnabled || !url.includes(PUBLIC_OBJECT_SEGMENT)) return undefined;
   const rendered = url.replace(PUBLIC_OBJECT_SEGMENT, RENDER_SEGMENT);
   const base = rendered.split('?')[0];
   return widths

@@ -1,44 +1,65 @@
 /**
- * Supabase Storage lifecycle helpers for *product/hero* media.
+ * Media storage facade — picks a driver, so routes never import an SDK.
  *
- * WHY THIS EXISTS
- * ---------------
- * `src/lib/mediaClient.js` in the admin frontend has always asked the backend to
- * sweep orphaned uploads (`POST /api/media/delete`), but no backend in this
- * workspace implemented it: the frontend call was written against a contract
- * that only existed in MEDIA_AUDIT.md §5.3. The chat backend in this repository
- * is the natural place for the route (it already owns the Supabase service-role
- * client and the storage credentials), so the route and this adapter live here.
+ * DRIVERS
+ * -------
+ *   r2        Cloudflare R2 (S3-compatible, zero egress). **The default.**
+ *             See `r2Storage.js`. Presigned browser uploads, server-side
+ *             Cache-Control rewrites, batched deletes.
  *
- * SAFETY RULES — every one of these is enforced in code, not by convention:
+ *   supabase  LEGACY, DEPRECATED. Kept only as an explicit opt-in
+ *             (`MEDIA_STORAGE_DRIVER=supabase`) so an operator can drain an
+ *             existing bucket, and so objects already stored there can still be
+ *             deleted. It is the reason this service used to generate Supabase
+ *             egress and log-ingestion charges: every `storage.from(...)` call
+ *             is a logged Storage request, and `rewriteCacheControl` moved the
+ *             whole object through this process.
  *
- *   1. **Only our Supabase project.** The URL host must equal `SUPABASE_URL`'s
- *      host. A crafted URL cannot point the service-role key at another project.
- *   2. **Only allow-listed buckets.** `MEDIA_DELETE_BUCKETS` (default
- *      `media,products`); anything else is skipped, never deleted.
- *   3. **Only real object URLs.** `/uploads/...` (legacy disk on the other
- *      backend), `data:`/`blob:` payloads, signed transform URLs with a foreign
- *      host, and bare keys are all rejected before any network call.
- *   4. **Reference check, fail closed.** An object is only removed when a
- *      `media_references` view proves no row points at it. If the view is
- *      missing or the query errors, the URL is *skipped*, not deleted.
- *   5. **Opt-in.** Deletion stays disabled until `MEDIA_DELETE_ENABLED=true`
- *      is set after the view has been created and verified (migration 003).
+ * WHY THE FACADE EXISTS
+ * ---------------------
+ * Both drivers expose the same methods, and every one of them resolves to a
+ * result object rather than throwing for an expected condition (foreign host,
+ * reference check unavailable, object missing). The routes turn those into
+ * per-URL `skipped` entries, so one bad URL never aborts a sweep.
+ *
+ *   parse(url)                        -> { ok, key } | { ok:false, reason }
+ *   referencedKeys(keys)              -> { ok, referenced:Set }
+ *   removeObject({ key })             -> { ok } | { ok:false, reason }
+ *   removeObjects(keys)               -> { ok, removed }            (R2 only)
+ *   rewriteCacheControl({ key }, s)   -> { ok } | { ok:false, reason }
+ *   presignUpload({ key, type, size })-> { ok, uploadUrl, url }     (R2 only)
+ *   putObject({ key, body, type })    -> { ok, url }                (R2 only)
  */
 
 import { isMissingRelation } from '../db/supabase.js';
+import { createR2Storage, isR2Configured } from './r2Storage.js';
 
-/** Objects can only be removed from these buckets unless overridden by env. */
+/** Objects can only be removed from these Supabase buckets unless overridden. */
 const DEFAULT_DELETE_BUCKETS = ['media', 'products'];
 
-/** One year. Content-addressed keys make immutable caching safe (see MEDIA_AUDIT §3.2). */
+/** One year. Content-addressed keys make immutable caching safe. */
 export const DEFAULT_CACHE_CONTROL_SECONDS = 31_536_000;
 
 /** Supabase stores cacheControl as seconds and serves `Cache-Control: max-age=<n>`. */
 const MAX_CACHE_CONTROL_SECONDS = 31_536_000;
 
 /**
- * Normalise a stored URL into `<bucket>/<key>` for Supabase objects, or a
+ * Which driver should be built for this env.
+ *
+ * R2 whenever it is configured — that is the migration. Supabase only when
+ * asked for by name, because silently falling back would keep billing the
+ * thing we are moving off.
+ */
+export function resolveStorageDriver(env = {}) {
+  const requested = String(env.MEDIA_STORAGE_DRIVER || '').trim().toLowerCase();
+  if (requested === 'supabase') return 'supabase';
+  if (requested === 'r2') return 'r2';
+  if (isR2Configured(env)) return 'r2';
+  return 'supabase';
+}
+
+/**
+ * Normalise a URL into `<bucket>/<key>` for Supabase objects, or a
  * leading-slash-free path for everything else. Mirrors `toStorageKey()` in the
  * frontend so both sides agree on object identity.
  */
@@ -62,8 +83,8 @@ export function toStorageKey(url) {
 }
 
 /**
- * Parse a storage URL into `{ bucket, key }`, or `{ reason }` explaining why it
- * cannot be deleted. Pure and synchronous: no network, no database.
+ * Parse a Supabase storage URL into `{ bucket, key }`, or `{ reason }`
+ * explaining why it cannot be deleted. Pure and synchronous.
  */
 export function parseStorageObject(url, { supabaseUrl } = {}) {
   if (!url || typeof url !== 'string' || !url.trim()) return { ok: false, reason: 'invalid' };
@@ -116,8 +137,7 @@ export function parseStorageObject(url, { supabaseUrl } = {}) {
 /**
  * `products/blue shirt.webp` and `products/blue%20shirt.webp` are the same
  * object. The frontend decodes; the SQL view does not, so every comparison
- * considers both spellings. Without this, an object whose key contains an
- * encoded character would look unreferenced and be deleted while in use.
+ * considers both spellings.
  */
 export function storageKeyVariants(key) {
   if (!key) return [];
@@ -142,9 +162,8 @@ export function parseBucketList(value, fallback = DEFAULT_DELETE_BUCKETS) {
 }
 
 /**
- * Clamp a requested cache-control value to seconds Supabase will accept.
- * Accepts `31536000`, `max-age=31536000` or a full header value; returns a
- * string of decimal seconds (Supabase composes `max-age=<seconds>` itself).
+ * Clamp a requested cache-control value to seconds. Accepts `31536000`,
+ * `max-age=31536000` or a full header value; returns decimal seconds.
  */
 export function resolveCacheControlSeconds(value, fallback = DEFAULT_CACHE_CONTROL_SECONDS) {
   const numeric = (input) => {
@@ -162,13 +181,14 @@ export function resolveCacheControlSeconds(value, fallback = DEFAULT_CACHE_CONTR
 }
 
 /**
- * Storage adapter bound to one project + client.
+ * LEGACY Supabase Storage adapter.
  *
- * Every method resolves to a small result object instead of throwing for
- * expected conditions (foreign host, unreferenced check unavailable, object
- * missing). The route turns those into `skipped` entries.
+ * Does not exist to serve new media — it exists so that objects already in a
+ * Supabase bucket can be deleted while R2 takes over. `putObject` and
+ * `presignUpload` are deliberately unimplemented: there is no supported way to
+ * write new bytes here any more, because that is what generated the bill.
  */
-export function createMediaStorage({ client, env = {}, logger } = {}) {
+export function createSupabaseStorage({ client, env = {}, logger } = {}) {
   const buckets = parseBucketList(env.MEDIA_DELETE_BUCKETS);
   const referencesView = env.MEDIA_REFERENCES_VIEW || 'media_references';
   const maxCacheBytes = Number(env.MEDIA_CACHE_CONTROL_MAX_BYTES) || 8 * 1024 * 1024;
@@ -180,11 +200,6 @@ export function createMediaStorage({ client, env = {}, logger } = {}) {
     return client.storage.from(bucket);
   }
 
-  /**
-   * One query for the whole batch: which of these keys does any row still
-   * point at? A missing view / failed query is reported as `ok: false` so the
-   * caller skips every URL — "cannot verify" must never mean "delete".
-   */
   async function referencedKeys(keys = []) {
     const unique = [...new Set(keys.filter(Boolean))];
     if (unique.length === 0) return { ok: true, referenced: new Set() };
@@ -233,9 +248,9 @@ export function createMediaStorage({ client, env = {}, logger } = {}) {
   }
 
   /**
-   * Re-upload an object with a corrected Cache-Control. Needed because
-   * Supabase has no metadata-only update: the bytes must be written again.
-   * Bounded by `MEDIA_CACHE_CONTROL_MAX_BYTES` and skips anything oversized.
+   * DEPRECATED. Supabase has no metadata-only update, so this downloaded the
+   * object and re-uploaded it — two logged Storage requests and a full copy of
+   * the bytes per image. Only reachable with `MEDIA_STORAGE_DRIVER=supabase`.
    */
   async function rewriteCacheControl({ bucket, key }, seconds) {
     if (!allowed(bucket)) return { ok: false, reason: 'bucket-not-allowed' };
@@ -263,12 +278,61 @@ export function createMediaStorage({ client, env = {}, logger } = {}) {
   }
 
   return {
+    driver: 'supabase',
     buckets,
     referencesView,
     parse: (url) => parseStorageObject(url, { supabaseUrl: env.SUPABASE_URL }),
     referencedKeys,
     removeObject,
     rewriteCacheControl,
+    /** Explicitly unsupported: new bytes must go to R2. */
+    presignUpload: async () => ({ ok: false, reason: 'driver-not-supported' }),
+    putObject: async () => ({ ok: false, reason: 'driver-not-supported' }),
+    publicUrl: () => null,
+    checkBucket: async () => ({ ok: true, deprecated: true }),
+  };
+}
+
+/**
+ * Pick a driver. R2 wins whenever it is configured; Supabase is opt-in only.
+ *
+ * @returns the R2 adapter, the legacy Supabase adapter, or a **degraded**
+ *   adapter that refuses everything with `storage-not-configured` instead of
+ *   taking the process down. A misconfigured media bucket must never stop
+ *   webhooks from being ingested.
+ */
+export function createMediaStorage({ client, env = {}, logger } = {}) {
+  const driver = resolveStorageDriver(env);
+
+  if (driver === 'r2' && isR2Configured(env)) {
+    return createR2Storage({ env, logger, supabaseClient: client });
+  }
+
+  if (driver === 'supabase') {
+    // `debug`, not `warn`: `server.js` already warns once at boot, and this
+    // factory runs per-process. Duplicating a deprecation notice at info/warn
+    // is exactly the kind of chatter that inflates log ingestion.
+    logger?.debug?.(
+      'MEDIA_STORAGE: using the deprecated Supabase Storage driver. ' +
+        'Set R2_BUCKET/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY/R2_PUBLIC_BASE_URL to move media off Supabase.',
+    );
+    return createSupabaseStorage({ client, env, logger });
+  }
+
+  logger?.error?.(`MEDIA_STORAGE: driver "${driver}" is not configured - every media operation will be refused.`);
+  const reason = 'storage-not-configured';
+  return {
+    driver,
+    configured: false,
+    parse: () => ({ ok: false, reason }),
+    referencedKeys: async () => ({ ok: false, reason, referenced: new Set() }),
+    removeObject: async () => ({ ok: false, reason }),
+    removeObjects: async () => ({ ok: false, reason, removed: [] }),
+    rewriteCacheControl: async () => ({ ok: false, reason }),
+    presignUpload: async () => ({ ok: false, reason }),
+    putObject: async () => ({ ok: false, reason }),
+    publicUrl: () => null,
+    checkBucket: async () => ({ ok: false, reason }),
   };
 }
 

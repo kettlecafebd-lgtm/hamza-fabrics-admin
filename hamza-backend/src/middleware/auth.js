@@ -21,7 +21,8 @@ export function createAuthMiddleware({ client, logger }) {
       const { data, error } = await client.auth.getUser(token);
       if (error || !data?.user) return next(unauthorized('Invalid or expired session.'));
 
-      const role = data.user.app_metadata?.role || data.user.user_metadata?.role || 'user';
+      // Only server-assigned roles may send as the shop; user_metadata is editable by the user.
+      const role = data.user.app_metadata?.role || 'user';
       if (!['admin', 'owner', 'manager', 'service_role'].includes(role)) {
         logger?.warn('Rejected non-admin inbox access', { userId: data.user.id, role });
         return next(unauthorized('Admin access required.'));

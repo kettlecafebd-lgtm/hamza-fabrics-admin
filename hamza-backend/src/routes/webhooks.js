@@ -86,6 +86,13 @@ export function createWebhookRouter({ env, logger, ingest, metaVerify }) {
       for (const change of changes) {
         if (change.field !== 'messages') continue;
         try {
+          // Meta can accept a send and report non-delivery later. Log only
+          // the correlation ID and code, not the recipient or raw payload.
+          for (const status of change.value?.statuses || []) {
+            if (status.status === 'failed') logger?.warn('WhatsApp delivery failed', {
+              platformMessageId: status.id, code: status.errors?.[0]?.code,
+            });
+          }
           results.push(await ingest.handleWhatsAppMessage({
             phoneNumberId: change.value?.metadata?.phone_number_id,
             value: change.value,

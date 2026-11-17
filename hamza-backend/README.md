@@ -20,7 +20,7 @@ webhook  ->  chat_messages.media_url (a URL string)  ->  browser loads from Meta
 ```bash
 cp .env.example .env      # fill in Supabase + Meta credentials
 npm install
-npm test                  # 34 unit/integration tests
+npm test                  # unit/integration tests (mock external services)
 node test/smoke-e2e.mjs   # 8 end-to-end checks against a mock Graph API
 npm start                 # listens on :5000
 ```
@@ -46,6 +46,38 @@ a half-configured media pipeline is worse than a stopped one.
 | GET | `/api/chat/media-health` | Bearer (admin) | proves no bytes are being stored |
 | POST | `/api/media/delete` | Bearer (admin) | removes replaced/deleted product & hero objects (opt-in, reference-checked) |
 | POST | `/api/media/cache-control` | Bearer (admin) | re-stores objects with a one-year `Cache-Control` (backfill) |
+
+## WhatsApp replies from the admin inbox
+
+Receiving a customer message via the WhatsApp Cloud API webhook and **sending** a
+reply are separate operations. The QR/linked-device bridge is a different service:
+this backend does not run it or need it for Cloud API text replies.
+
+- Configure the connected number’s **server-side** `WHATSAPP_TOKEN` with the
+  `whatsapp_business_messaging` permission. A webhook verify token, Facebook
+  Page token, or Hamza admin login token is not a substitute. Never put it in
+  the Vite environment. `WHATSAPP_PHONE_NUMBER_ID` is Meta’s ID for the business
+  number, **not** the display phone number.
+- `POST /api/chat/conversations/:id/messages` uses the inbound thread’s `page_id`
+  (the webhook’s `metadata.phone_number_id`) and `external_id` (the customer’s
+  WhatsApp ID). The configured number ID is a fallback for older threads; if
+  both sender IDs exist and disagree, sending stops rather than switching numbers.
+- For a deployment with a **separate production API**, port this send path to its
+  existing authenticated chat route and use its server-side OAuth token for the
+  selected business number. Updating the static admin site alone cannot send a
+  message. Here admin roles are verified from Supabase `app_metadata`, not
+  user-editable profile fields.
+
+**Verify after deployment:** send a new incoming message from a test customer
+phone, reply once from Hamza, and check that phone. The chat API returns `201`
+with Meta’s `platform_message_id` only after Meta accepts a WhatsApp reply and
+it is saved. Acceptance is not a delivery receipt: if the phone does not get
+the message, match that ID to `WhatsApp delivery failed` in the API logs from
+the signed status webhook. Free-form replies require an open 24-hour customer
+service window; outside it, wait for a new inbound message or use an approved
+template (not sent by this text composer). No old replies are replayed. A `202`
+with a warning means Meta accepted the reply but the inbox update failed; do
+not send it again.
 
 ## Design notes
 

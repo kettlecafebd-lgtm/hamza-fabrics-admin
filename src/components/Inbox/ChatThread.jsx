@@ -121,9 +121,10 @@ export default function ChatThread({ conversationId, conversation, isDark, onBac
       });
       const data = await res.json();
       if (!res.ok || !data?.success) {
-        throw new Error(data?.message || `Failed to send message (${res.status}).`);
+        throw new Error(data?.error?.message || data?.message || `Failed to send message (${res.status}).`);
       }
 
+      if (data.warning) setSendError(data.warning);
       if (data.message) {
         setMessages(current => mergeMessages(current, [data.message]));
       } else {

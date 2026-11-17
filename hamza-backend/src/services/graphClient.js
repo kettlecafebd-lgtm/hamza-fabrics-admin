@@ -20,7 +20,7 @@ export const ATTACHMENT_FIELDS = [
 export function createGraphClient({ baseUrl, version, logger, fetchImpl = globalThis.fetch }) {
   const root = `${baseUrl.replace(/\/+$/, '')}/${version}`;
 
-  async function request(path, { accessToken, method = 'GET', timeoutMs = 10_000, query = {} } = {}) {
+  async function request(path, { accessToken, method = 'GET', timeoutMs = 10_000, query = {}, json } = {}) {
     if (!accessToken) {
       throw new HttpError(500, 'No access token configured for Graph API.', { code: 'GRAPH_NO_TOKEN' });
     }
@@ -29,18 +29,18 @@ export function createGraphClient({ baseUrl, version, logger, fetchImpl = global
     for (const [key, value] of Object.entries(query)) {
       if (value != null && value !== '') url.searchParams.set(key, String(value));
     }
-    // Token in the header, never in the URL: URLs end up in logs and referrers.
-    url.searchParams.set('access_token', accessToken);
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
     let res;
     try {
-      res = await fetchImpl(url, { method, signal: controller.signal });
+      // Token in the header, never in the URL. Bound both headers and body.
+      res = await fetchImpl(url, {
+        method,
+        headers: { Authorization: `Bearer ${accessToken}`, ...(json !== undefined && { 'Content-Type': 'application/json' }) },
+        ...(json !== undefined && { body: JSON.stringify(json), redirect: 'error' }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
     } catch (error) {
       throw badGateway(`Graph API request failed: ${error.message}`, { path });
-    } finally {
-      clearTimeout(timer);
     }
 
     let body;
@@ -52,18 +52,17 @@ export function createGraphClient({ baseUrl, version, logger, fetchImpl = global
 
     if (!res.ok || body?.error) {
       const meta = body?.error || {};
-      // Never include the request URL: it carries the access token.
+      // Do not log provider error text: it can echo request data.
       logger?.warn('Graph API error', {
         path,
         status: res.status,
         code: meta.code,
         subcode: meta.error_subcode,
-        message: meta.message,
         type: meta.type,
       });
       throw new HttpError(res.status === 404 ? 404 : 502, meta.message || 'Graph API error.', {
         code: `GRAPH_${meta.code || res.status}`,
-        details: { type: meta.type, subcode: meta.error_subcode, path },
+        details: { status: res.status, type: meta.type, subcode: meta.error_subcode, path },
         expose: res.status === 404,
       });
     }

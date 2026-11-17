@@ -2,6 +2,7 @@ import express from 'express';
 import { asyncHandler, badRequest, notFound } from '../lib/httpError.js';
 import { resolveMessageMedia, serializeMessage } from '../services/attachmentResolver.js';
 import { signMediaToken } from '../lib/mediaSignature.js';
+import { sendWhatsAppReply } from '../services/whatsappReply.js';
 
 /**
  * Inbox API consumed by the admin frontend.
@@ -17,12 +18,6 @@ import { signMediaToken } from '../lib/mediaSignature.js';
  */
 export function createChatRouter({ env, logger, client, messages }) {
   const router = express.Router();
-
-  const sign = (messageId) =>
-    signMediaToken(
-      { messageId, exp: Math.floor(Date.now() / 1000) + env.MEDIA_URL_SIGNING_TTL_SECONDS },
-      env.MEDIA_URL_SIGNING_SECRET,
-    );
 
   router.get('/conversations', asyncHandler(async (req, res) => {
     const limit = clampInt(req.query.limit, 50, 1, 200);
@@ -64,29 +59,44 @@ export function createChatRouter({ env, logger, client, messages }) {
   }));
 
   router.post('/conversations/:id/messages', asyncHandler(async (req, res) => {
-    const content = String(req.body?.content || '').trim();
+    const content = typeof req.body?.content === 'string' ? req.body.content.trim() : '';
     if (!content) throw badRequest('content is required.');
 
     const { data: conversation, error: convError } = await client
       .from('conversations')
-      .select('id, platform')
+      .select('id, platform, external_id, page_id')
       .eq('id', req.params.id)
       .maybeSingle();
     if (convError) throw convError;
     if (!conversation) throw notFound('Conversation not found.');
 
-    const saved = await messages.insertMessage({
-      conversation_id: conversation.id,
-      direction: 'outbound',
-      content,
-      created_at: new Date().toISOString(),
-      ...toTextColumns(),
-    });
+    // A local insert isn't a send. For WhatsApp require Meta's message ID
+    // before changing history or the conversation preview. Never replay old rows.
+    const platformMessageId = conversation.platform === 'whatsapp'
+      ? await sendWhatsAppReply({ env, graph: req.app.locals.graph, conversation, content })
+      : null;
 
-    await messages.touchConversation(conversation.id, { lastMessage: content, at: saved.created_at });
+    let saved;
+    try {
+      saved = await messages.insertMessage({
+        conversation_id: conversation.id,
+        ...(platformMessageId && { platform_message_id: platformMessageId }),
+        direction: 'outbound',
+        content,
+        created_at: new Date().toISOString(),
+        ...toTextColumns(),
+      });
+      await messages.touchConversation(conversation.id, { lastMessage: content, at: saved.created_at });
+    } catch (error) {
+      if (!platformMessageId) throw error;
+      // Do not tell the operator to retry a message Meta already accepted.
+      logger?.error('WhatsApp reply accepted but inbox update failed', { platformMessageId, code: error.code });
+      return res.status(202).json({
+        success: true, platform_message_id: platformMessageId,
+        warning: 'WhatsApp accepted the reply, but Hamza could not finish updating the inbox. Do not resend it.',
+      });
+    }
 
-    // Outbound sending to Meta is intentionally out of scope for this refactor:
-    // it is a separate integration and does not touch media storage.
     res.status(201).json({ success: true, message: serializeMessage(saved, null) });
   }));
 

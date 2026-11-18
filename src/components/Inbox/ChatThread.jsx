@@ -3,29 +3,9 @@ import { Send, ArrowLeft } from 'lucide-react';
 import API_BASE_URL from '../../config/api';
 import { useWebSocket } from '../../context/WebSocketContext';
 import ChatMedia from './ChatMedia';
+import { mergeMessages } from '../../lib/inboxMessages';
 
-function mergeMessages(...messageLists) {
-  const messages = [];
-  const seen = new Set();
-
-  for (const list of messageLists) {
-    if (!Array.isArray(list)) continue;
-
-    for (const message of list) {
-      if (!message || typeof message !== 'object') continue;
-      const key = message.id != null
-        ? `id:${message.id}`
-        : `fallback:${message.direction || ''}:${message.created_at || ''}:${message.content || ''}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      messages.push(message);
-    }
-  }
-
-  return messages;
-}
-
-export default function ChatThread({ conversationId, conversation, isDark, onBack }) {
+export default function ChatThread({ conversationId, conversation, isDark, onBack, historyRevision }) {
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [loading, setLoading] = useState(true);
@@ -45,53 +25,32 @@ export default function ChatThread({ conversationId, conversation, isDark, onBac
     });
     const data = await res.json();
     if (!res.ok || !data?.success || !Array.isArray(data.messages)) {
-      throw new Error(data?.message || `Failed to load messages (${res.status}).`);
+      throw new Error(data?.error?.message || data?.message || `Failed to load messages (${res.status}).`);
     }
     return data.messages;
   }, [conversationId]);
 
-  const fetchMessages = useCallback(async (signal) => {
-    if (!conversationId) return;
-    setLoading(true);
-    setLoadError('');
-
-    try {
-      const history = await requestMessages(signal);
-      if (!signal?.aborted) {
-        // Preserve messages that arrived over the socket while history was loading.
-        setMessages(current => mergeMessages(history, current));
-      }
-    } catch (error) {
-      if (!signal?.aborted) {
-        console.error('Failed to fetch chat messages:', error);
-        setLoadError(error.message || 'Could not load messages.');
-      }
-    } finally {
-      if (!signal?.aborted) setLoading(false);
-    }
-  }, [conversationId, requestMessages]);
+  const fetchMessages = useCallback((signal) => requestMessages(signal)
+    .then(history => {
+      if (signal?.aborted) return;
+      setLoadError('');
+      // Preserve messages that arrived over the socket while history was loading.
+      setMessages(current => mergeMessages(history, current));
+    })
+    .catch(error => {
+      if (signal?.aborted) return;
+      console.error('Failed to fetch chat messages:', error);
+      setLoadError(error.message || 'Could not load messages.');
+    })
+    .finally(() => { if (!signal?.aborted) setLoading(false); }), [requestMessages]);
 
   useEffect(() => {
     if (!conversationId) return undefined;
 
     const controller = new AbortController();
-    requestMessages(controller.signal)
-      .then(history => {
-        if (controller.signal.aborted) return;
-        setLoadError('');
-        // Preserve messages that arrived over the socket while history was loading.
-        setMessages(current => mergeMessages(history, current));
-      })
-      .catch(error => {
-        if (controller.signal.aborted) return;
-        console.error('Failed to fetch chat messages:', error);
-        setLoadError(error.message || 'Could not load messages.');
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
+    fetchMessages(controller.signal);
     return () => controller.abort();
-  }, [conversationId, requestMessages]);
+  }, [conversationId, fetchMessages, historyRevision]);
 
   useEffect(() => {
     if (!conversationId) return undefined;

@@ -38,7 +38,9 @@ export function createChatRouter({ env, logger, client, messages }) {
       .from('chat_messages')
       .select('id, conversation_id, platform_message_id, direction, content, created_at, message_type, media_url, media_type, media_mime_type, media_id, media_source, media_refreshed_at')
       .eq('conversation_id', req.params.id)
-      .order('created_at', { ascending: true })
+      // Limit the newest rows, not the oldest replies in a long thread.
+      .order('created_at', { ascending: false, nullsFirst: false })
+      .order('id', { ascending: false })
       .limit(limit);
 
     if (error) throw error;
@@ -46,7 +48,7 @@ export function createChatRouter({ env, logger, client, messages }) {
     // Resolve media for messages that actually have it. Text-only rows cost
     // nothing, and WhatsApp resolution failures degrade to `available: false`.
     const serialized = await Promise.all(
-      (data || []).map(async (message) => {
+      (data || []).reverse().map(async (message) => {
         const needsMedia = Boolean(message.media_url || message.media_id || message.media_type);
         if (!needsMedia) return serializeMessage(message, null);
 

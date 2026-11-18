@@ -16,6 +16,7 @@ export default function UnifiedInbox() {
   const [conversations, setConversations] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [selectedConv, setSelectedConv] = useState(null);
+  const [historyRevision, setHistoryRevision] = useState(0);
   const [loading, setLoading] = useState(true);
   const [showMobileChat, setShowMobileChat] = useState(false);
   const [showContextPanel, setShowContextPanel] = useState(true);
@@ -87,6 +88,19 @@ export default function UnifiedInbox() {
     return () => { unsub1(); unsub2(); };
   }, [subscribe, selectedId, fetchConversations]);
 
+  // The QR bridge may persist a reply without publishing a socket event.
+  // Refresh the open history too, without remounting it and losing the draft.
+  const refreshInbox = useCallback(() => {
+    setHistoryRevision(n => n + 1);
+    fetchConversations();
+  }, [fetchConversations]);
+
+  useEffect(() => {
+    const onVisible = () => { if (document.visibilityState === 'visible') refreshInbox(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [refreshInbox]);
+
   const handleSelect = (id) => {
     setSelectedId(id);
     setSelectedConv(conversations.find(c => c.id === id));
@@ -112,7 +126,7 @@ export default function UnifiedInbox() {
             {connected ? 'Live' : 'Offline'}
           </span>
           <span className="text-xs text-t-muted font-bold">{conversations.length} chats</span>
-          <button onClick={fetchConversations} className="p-2 rounded-lg hover:bg-t-primary/10 transition-colors text-t-muted hover:text-t-primary">
+          <button onClick={refreshInbox} aria-label="Refresh inbox" title="Refresh inbox" className="p-2 rounded-lg hover:bg-t-primary/10 transition-colors text-t-muted hover:text-t-primary">
             <RefreshCw className="w-4 h-4" />
           </button>
           <button onClick={() => setShowContextPanel(p => !p)} className="p-2 rounded-lg hover:bg-t-primary/10 transition-colors text-t-muted hover:text-t-primary hidden lg:block">
@@ -127,7 +141,7 @@ export default function UnifiedInbox() {
         <div className={`w-full md:w-80 lg:w-96 border-r ${borderColor} shrink-0 flex flex-col ${
           showMobileChat ? 'hidden md:flex' : 'flex'
         }`}>
-          {loading ? (
+          {loading && !conversations.length ? (
             <div className="flex items-center justify-center h-full">
               <div className="w-6 h-6 border-2 border-t-primary border-t-transparent rounded-full animate-spin"></div>
             </div>
@@ -150,6 +164,7 @@ export default function UnifiedInbox() {
             key={selectedId ?? 'no-conversation'}
             conversationId={selectedId}
             conversation={selectedConv}
+            historyRevision={historyRevision}
             isDark={isDark}
             onBack={() => setShowMobileChat(false)}
           />

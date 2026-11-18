@@ -16,6 +16,7 @@ import { guardLogLevel, requestLogger as requestLoggerMiddleware } from './middl
 import { createRefreshMediaRouter } from './routes/refreshMedia.js';
 import { createChatRouter } from './routes/chat.js';
 import { createWebhookRouter } from './routes/webhooks.js';
+import { createWhatsAppBridgeHandler } from './routes/whatsappBridge.js';
 import { createAuthMiddleware } from './middleware/auth.js';
 import { metaSignatureMiddleware } from './lib/metaSignature.js';
 
@@ -97,7 +98,10 @@ export function createApp({ env = loadEnv(), logger = createLogger({ level: proc
   // Media proxy must be reachable from <img src> -> signed URLs, no auth header.
   app.use('/api/chat/media', createMediaRouter({ env, logger, blobStore, messages, graph, mediaFetcher }));
 
-  // Webhooks authenticate with X-Hub-Signature-256, not bearer tokens.
+  // A separate, receive-only credential for the existing QR-linked device.
+  app.post('/api/bridge/whatsapp/replies', createWhatsAppBridgeHandler({ env, client, logger }));
+
+  // Meta webhooks authenticate with X-Hub-Signature-256, not bearer tokens.
   app.use('/api/webhooks', createWebhookRouter({ env, logger, ingest, metaVerify }));
 
   // All admin media routes share ONE auth pass. Mounting two routers each

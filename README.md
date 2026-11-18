@@ -1,4 +1,8 @@
-# React + Vite
+# Hamza Fabrics admin
+
+**WhatsApp replies missing from Unified Inbox?** For replies sent on a QR-linked business phone or WhatsApp Web, see [Connect the linked-device bridge](hamza-backend/docs/linked-device-replies.md). For messages sent *from the website* via Meta's Cloud API, see [WhatsApp replies from the admin inbox](hamza-backend/README.md#whatsapp-replies-from-the-admin-inbox).
+
+## React + Vite
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 

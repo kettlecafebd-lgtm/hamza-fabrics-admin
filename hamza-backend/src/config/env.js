@@ -136,6 +136,10 @@ export function loadEnv(source = process.env) {
     WHATSAPP_PHONE_NUMBER_ID: source.WHATSAPP_PHONE_NUMBER_ID || '',
     WHATSAPP_VERIFY_TOKEN: source.WHATSAPP_VERIFY_TOKEN || source.META_VERIFY_TOKEN || '',
 
+    // Dedicated linked-device receiver; independent of Meta and admin tokens.
+    WHATSAPP_BRIDGE_SECRET: source.WHATSAPP_BRIDGE_SECRET || '',
+    WHATSAPP_BRIDGE_PAGE_ID: source.WHATSAPP_BRIDGE_PAGE_ID || '',
+
     MEDIA_URL_SIGNING_SECRET: source.MEDIA_URL_SIGNING_SECRET || '',
     /** Absolute base URL used when serialising media links (optional). */
     PUBLIC_API_BASE_URL: source.PUBLIC_API_BASE_URL || '',

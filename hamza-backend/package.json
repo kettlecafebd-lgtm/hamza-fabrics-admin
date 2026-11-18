@@ -18,5 +18,8 @@
     "@aws-sdk/s3-request-presigner": "^3.1171.0",
     "@supabase/supabase-js": "^2.45.4",
     "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.16"
   }
 }

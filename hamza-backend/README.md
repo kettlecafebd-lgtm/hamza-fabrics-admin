@@ -39,7 +39,8 @@ a half-configured media pipeline is worse than a stopped one.
 | GET | `/api/webhooks/meta` | none | Meta verification handshake |
 | POST | `/api/webhooks/meta` | `X-Hub-Signature-256` | Messenger/Instagram events |
 | GET | `/api/webhooks/whatsapp` | none | WhatsApp handshake |
-| POST | `/api/webhooks/whatsapp` | `X-Hub-Signature-256` | WhatsApp events |
+| POST | `/api/webhooks/whatsapp` | `X-Hub-Signature-256` | WhatsApp Cloud API events |
+| POST | `/api/bridge/whatsapp/replies` | dedicated bridge bearer secret | record a text already sent from the QR-linked business phone |
 | GET | `/api/chat/media/:id` | none (legacy) | 302 to stored URL, else blob, else 404 |
 | GET | `/api/chat/media/s/:token` | signed HMAC | same, for URLs handed to `<img>` |
 | GET | `/api/chat/refresh-media/:messageId` | Bearer (admin) | re-resolve an expired URL via Graph |
@@ -82,7 +83,9 @@ refused in production and clamped to `info`.
 
 Receiving a customer message via the WhatsApp Cloud API webhook and **sending** a
 reply are separate operations. The QR/linked-device bridge is a different service:
-this backend does not run it or need it for Cloud API text replies.
+this backend does not run it or need it for Cloud API text replies. For the
+opposite direction — a reply sent **on the business phone** missing from the
+website — follow [Linked-device reply sync](docs/linked-device-replies.md).
 
 - Configure the connected number’s **server-side** `WHATSAPP_TOKEN` with the
   `whatsapp_business_messaging` permission. A webhook verify token, Facebook
